@@ -811,6 +811,7 @@ int main(int argc, char** argv) {
     strata::kernels::ple_set_native_postops(o.native_ple_postops);
     const strata::core::ModelGeometry g;
     const int64_t K = 10;
+
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
         std::fprintf(stderr, "strata generate: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
                      (long long) o.max_context, o.tokens.size(), (long long) o.max_new);
@@ -2002,6 +2003,14 @@ int main(int argc, char** argv) {
         bool mrope_identity = true;
         std::vector<float> img_rows;
         std::vector<const float*> row_ptr;
+        // ================================ THE CONVERSATION CACHE ================================
+        // After a request, the session state reflects exactly the tokens in `history` (the request's
+        // prompt plus every generated token the verify windows fed back).  A following request whose
+        // ids EXTEND that sequence skips the state zeroing and re-processes only the new tail: a
+        // continuing chat pays prefill for its new tokens alone.  Any divergence - a shorter prompt,
+        // a different prefix - resets the state and takes the full path.
+        std::vector<int64_t> history;       // the tokens the session state has consumed
+        std::vector<int64_t> consumed_seq;  // per-request working copy of the same
         while (next_line(line)) {
             if (line == "QUIT") break;
             stop_req.store(false);   // a STOP that arrived between requests is stale
@@ -2109,9 +2118,22 @@ int main(int argc, char** argv) {
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
             if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
             cur = ids;
+            // ---- the history cache: reuse the session state when this request strictly extends the
+            // tokens the state already consumed
+            bool reuse = (int64_t) history.size() < n;
+            for (int64_t i = 0; reuse && i < (int64_t) history.size(); ++i)
+                reuse = ids[(size_t) i] == history[(size_t) i];
+            const int64_t consumed = reuse ? (int64_t) history.size() : 0;
             const Clock::time_point r0 = Clock::now();
-            strata::core::session_zero(ss, g, nullptr, main_cs);
-            cudaStreamSynchronize(main_stream);
+            if (reuse) {
+                // the state already consumed the shared prefix; the delta arrives below
+                consumed_seq.assign(history.begin(), history.end());
+                consumed_seq.insert(consumed_seq.end(), ids.begin() + consumed, ids.end() - 1);
+            } else {
+                strata::core::session_zero(ss, g, nullptr, main_cs);
+                cudaStreamSynchronize(main_stream);
+                consumed_seq.assign(ids.begin(), ids.end() - 1);
+            }
             tr("request", n, geni ? 1 : 0);
             mtp.set_prompt_len(n);
             std::vector<std::pair<int32_t, int32_t>> lent_now;
@@ -2126,7 +2148,7 @@ int main(int argc, char** argv) {
             }
             bool cancelled = false;
             tr("prompt start", n - 1);
-            if (n > 1 && !sp.run(ids.data(), n - 1, 0, err)) {
+            if (n - 1 > consumed && !sp.run(ids.data() + consumed, n - 1 - consumed, consumed, err)) {
                 if (!stop_req.load()) {
                     std::fprintf(stderr, "strata serve: %s\n", err.c_str());
                     std::printf("ERR %s\n", err.c_str());
@@ -2187,6 +2209,9 @@ int main(int argc, char** argv) {
                     std::printf("ERR %s\n", err.c_str());
                     return 1;
                 }
+                // the window's tokens are now consumed by the state (the last sampled token is not:
+                // it joins only when the next window feeds it)
+                for (int i = 0; i <= a; ++i) consumed_seq.push_back((int64_t) window[(size_t) i]);
                 first_window = false;
                 bool eos = false;
                 for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
@@ -2213,6 +2238,9 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            history = consumed_seq;   // the state now reflects exactly these tokens
+            std::fprintf(stderr, "strata serve: history cache: %lld prompt tokens reused, %lld processed\n",
+                         (long long) consumed, (long long) (n - consumed));
             std::printf("DONE %lld %lld %.1f %.1f %s\n", (long long) produced_n, (long long) n, prompt_ms, decode_ms,
                         finish);
             std::fflush(stdout);
