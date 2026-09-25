@@ -47,12 +47,28 @@ std::vector<int> physical_cores(bool skip_first) {
         }
     }
 #else
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    if (sched_getaffinity(0, sizeof set, &set) == 0)
-        for (int i = 0; i < CPU_SETSIZE; ++i)
-            if (CPU_ISSET(i, &set)) cores.push_back(i);
-    else
+    // **THE MASK IS THE KERNEL'S WHOLE `possible` RANGE, AND THAT IS NOT THE MACHINE.**  `sched_getaffinity`
+    // hands back one bit per POSSIBLE cpu, and inside a container on a big host this machine saw a
+    // 24,024-bit mask for 24 online cpus.  The fixed 1024-bit `cpu_set_t` cannot hold it: glibc's wrapper
+    // copies past it (it retries internally with a buffer of the kernel's own size), the scan below then
+    // reads whatever the overflow left adjacent on the stack, and the count that comes out was 24,023
+    // "cores" - which the pool faithfully spawned as 24,023 unpinned spin-wait threads and the PC stopped
+    // being usable.  So ask the kernel for a mask SIZED to what this process can actually run, and enumerate
+    // only that.
+    const unsigned online = std::thread::hardware_concurrency();
+    if (online > 0) {
+        cpu_set_t* set = CPU_ALLOC(online);
+        if (set != nullptr) {
+            const size_t bytes = CPU_ALLOC_SIZE(online);
+            CPU_ZERO_S(bytes, set);
+            if (sched_getaffinity(0, bytes, set) == 0) {
+                for (unsigned i = 0; i < online; ++i)
+                    if (CPU_ISSET_S(i, bytes, set)) cores.push_back((int) i);
+            }
+            CPU_FREE(set);
+        }
+    }
+    if (cores.empty())
         for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) cores.push_back((int) i);
 #endif
     if (skip_first && !cores.empty()) cores.erase(cores.begin());
@@ -110,6 +126,13 @@ void restore_thread_affinity(long long previous) {
 ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works) : host_works_(host_works) {
     const std::vector<int> cores = physical_cores(true);
     n_ = n_workers > 0 ? n_workers : (int) cores.size();
+    // The default path is bounded by the enumeration, which is bounded by `hardware_concurrency()` - but a
+    // caller-supplied count is honoured as given, and the one belt-and-braces clamp that costs nothing is
+    // on the DEFAULT: more workers than the machine has logical cpus is never the machine asking for it.
+    if (n_workers <= 0) {
+        const unsigned online = std::thread::hardware_concurrency();
+        if (online > 0 && n_ > (int) online) n_ = (int) online;
+    }
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
     split_.resize((size_t) kMaxSplit);
