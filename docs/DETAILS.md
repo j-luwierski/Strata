@@ -200,9 +200,9 @@ print(r.choices[0].message.content)
   add `"api_key": "some-long-secret"` to `strata-<model>.json` (or set the `STRATA_API_KEY` environment variable);
   clients then send it as their API key.
 
-**Current limits (v1):** one request at a time; greedy decoding (temperature is ignored); every request processes its
-whole prompt again (no conversation cache yet, so long chats have a long time-to-first-token); images only when set up
-with them (below); no video.
+**Current limits (v1):** one request at a time; greedy decoding (temperature is ignored); images only when set up
+with them (below); no video. A conversation cache reuses the previous request's state when the new prompt extends it,
+so an ongoing chat processes only its new tokens.
 
 ---
 
