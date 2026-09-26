@@ -8,6 +8,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/expert.hpp"
+#include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "ggml-cpu.h"
 #include "strata/kernels/iq_kernels.hpp"
@@ -102,7 +103,9 @@ int main(int argc, char** argv) {
                 ffp[k] = ff[k].data();
             }
             cpu::native_gu_rows(f, blob.data(), a, NT, ffp, 0, (int) FF);
-            if (cpu::iq512_supported(f.gu_type)) {
+            // the AVX-512 TU executes zmm code on entry, so an AVX2-only box must not even call it
+            // (the engine's own dispatch is `cpu_avx512_ok() && iq512_supported`, see native_gu_rows)
+            if (cpu::cpu_avx512_ok() && cpu::iq512_supported(f.gu_type)) {
                 // the AVX-512 rows against ggml's own vec_dot, same Q8_K activations: float-order differences only
                 std::vector<float> g512((size_t) NT * FF), gref((size_t) NT * FF);
                 float* gp[NT];
@@ -151,12 +154,12 @@ int main(int argc, char** argv) {
                 std::vector<float> alt((size_t) NT * H);
                 float* altp[NT];
                 for (int k = 0; k < NT; ++k) {
-                    cpu::act_quant_q8_1(ff[k].data(), (int) FF, a2[k]);
+                    cpu::act_quant_any(ff[k].data(), (int) FF, a2[k]);
                     ap[k] = &a2[k];
                     altp[k] = alt.data() + k * H;
                 }
-                cpu::q2_0_gguf_rows_multi(blob.data() + f.down_off, f.d_row, (int) (FF / 64), ap, NT, altp, 0, (int) H);
-                std::printf("          q2_0 AVX-512 down vs ggml down: rel %.2e\n", rel(alt, got_c));
+                cpu::q2_rows_any(blob.data() + f.down_off, f.d_row, (int) (FF / 64), ap, NT, altp, 0, (int) H);
+                std::printf("          q2_0 pool kernel down vs ggml down: rel %.2e\n", rel(alt, got_c));
             }
         }
         // (c) the GPU: one group holding the NT entries
