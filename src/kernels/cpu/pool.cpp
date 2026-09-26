@@ -19,6 +19,40 @@
 
 namespace strata::kernels::cpu {
 
+#if !defined(_WIN32)
+/// The sibling cpus of one logical cpu (its SMT group) from the kernel's topology, in the order sysfs
+/// lists them; empty when the file is missing or unreadable - the caller then keeps every logical cpu.
+static std::vector<int> thread_siblings(int cpu) {
+    std::vector<int> group;
+    char path[128];
+    std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+    std::FILE* f = std::fopen(path, "r");
+    if (f == nullptr) return group;
+    unsigned v = 0;
+    bool any = false;
+    for (;;) {
+        const int c = std::fgetc(f);
+        if (c >= '0' && c <= '9') { v = v * 10u + (unsigned) (c - '0'); any = true; continue; }
+        if (any) { group.push_back((int) v); v = 0; any = false; }   // a number just ended
+        if (c == '-') {           // a range "0-11": expand it
+            if (group.empty()) break;
+            int lo = group.back();
+            group.pop_back();
+            int hi = lo;
+            int d;
+            for (d = std::fgetc(f); d >= '0' && d <= '9'; d = std::fgetc(f)) hi = hi * 10 + (d - '0');
+            for (int x = lo; x <= hi && x < lo + 4096; ++x) group.push_back(x);
+            if (d == ',') continue;
+            break;
+        }
+        if (c == ',' || c == ' ' || c == '\t') continue;
+        break;                    // EOF or anything unexpected
+    }
+    std::fclose(f);
+    return group;
+}
+#endif
+
 std::vector<int> physical_cores(bool skip_first) {
     std::vector<int> cores;
 #if defined(_WIN32)
@@ -55,6 +89,14 @@ std::vector<int> physical_cores(bool skip_first) {
     // "cores" - which the pool faithfully spawned as 24,023 unpinned spin-wait threads and the PC stopped
     // being usable.  So ask the kernel for a mask SIZED to what this process can actually run, and enumerate
     // only that.
+    //
+    // **AND ONE CPU PER PHYSICAL CORE, MATCHING THE WINDOWS BRANCH.**  The mask above lists LOGICAL cpus,
+    // so on an SMT machine the default pool put two AVX2 workers on every core (measured on a Ryzen 9
+    // 5900X: 23 workers + the host over 12 cores, decode 53.4 tok/s against 58.4 with one worker per
+    // core - the siblings contend for the core's SIMD ports and each runs slower than half the pair).
+    // The kernel publishes the sibling groups in sysfs; keeping the FIRST member of each group lands the
+    // pool on distinct physical cores.  A system whose sysfs is missing or unusual falls back to the
+    // logical enumeration rather than guessing.
     const unsigned online = std::thread::hardware_concurrency();
     if (online > 0) {
         cpu_set_t* set = CPU_ALLOC(online);
@@ -62,8 +104,20 @@ std::vector<int> physical_cores(bool skip_first) {
             const size_t bytes = CPU_ALLOC_SIZE(online);
             CPU_ZERO_S(bytes, set);
             if (sched_getaffinity(0, bytes, set) == 0) {
+                std::vector<int> logical;
                 for (unsigned i = 0; i < online; ++i)
-                    if (CPU_ISSET_S(i, bytes, set)) cores.push_back((int) i);
+                    if (CPU_ISSET_S(i, bytes, set)) logical.push_back((int) i);
+                std::vector<bool> seen(online, false);
+                for (int c : logical) {
+                    if (c >= 0 && (unsigned) c < online && seen[(size_t) c]) continue;
+                    std::vector<int> group = thread_siblings(c);
+                    int keep = c;
+                    for (int sib : group)
+                        if (sib >= 0 && (unsigned) sib < online) seen[(size_t) sib] = true;
+                    if (!group.empty()) keep = group[0];   // the lowest sibling, as sysfs lists them
+                    if (keep >= 0 && (unsigned) keep < online && CPU_ISSET_S((unsigned) keep, bytes, set))
+                        cores.push_back(keep);
+                }
             }
             CPU_FREE(set);
         }
