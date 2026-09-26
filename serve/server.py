@@ -739,6 +739,16 @@ class Server(ThreadingHTTPServer):
     # either one (a forgotten second start of run-<model>.bat).  Without it the second start fails loudly instead.
     allow_reuse_address = os.name != "nt"
 
+    def handle_error(self, request, client_address):
+        # A client that hangs up mid-response (a probe that closes before reading, a browser tab) makes the
+        # response write fail with EPIPE/ECONNRESET.  That is the client's timing, not a server fault, and
+        # socketserver's default would print the full traceback for every occurrence - so the connection-error
+        # class stays quiet and anything unexpected still gets the traceback.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
 
 def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     httpd = Server((host, port), make_handler(svc))
