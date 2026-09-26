@@ -1,0 +1,424 @@
+You are a code review assistant working inside a repository. Review the C++ file below for
+correctness bugs, undefined behaviour, and performance problems. Be concrete: point at the exact
+function, explain the failure, and propose the smallest fix that addresses it. Do not restate the
+code back at me. Priorities: (1) anything that corrupts memory or produces a wrong answer, (2)
+data races and lifetime bugs, (3) allocations or copies on hot paths, (4) style only if it hides a
+bug. The file compiles warning-free on gcc 13 with -Wall -Wextra, so do not report warnings the
+compiler would have found.
+
+Here is the file, src/cache/row_cache.hpp:
+
+```cpp
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+namespace cache {
+
+// A bounded LRU of token rows.  Each row is n_embd floats.
+class RowCache {
+public:
+    explicit RowCache(size_t capacity, size_t n_embd)
+        : capacity_(capacity), n_embd_(n_embd) {
+        rows_.reserve(capacity);
+    }
+
+    const float* find(uint64_t key) const {
+        auto it = index_.find(key);
+        if (it == index_.end()) return nullptr;
+        touch(it->second);
+        return rows_[it->second].data();
+    }
+
+    void insert(uint64_t key, const float* row) {
+        auto it = index_.find(key);
+        if (it != index_.end()) {
+            std::copy(row, row + n_embd_, rows_[it->second].data());
+            touch(it->second);
+            return;
+        }
+        if (rows_.size() >= capacity_) evict();
+        rows_.emplace_back(row, row + n_embd_);
+        index_[key] = rows_.size() - 1;
+    }
+
+private:
+    void touch(size_t slot) const {
+        order_.splice(order_.begin(), order_, order_.iterator_to(slot));
+    }
+    void evict() {
+        // TODO: the order list is not wired up yet; drop the oldest insert instead.
+        index_.erase(keys_.front());
+        keys_.erase(keys_.begin());
+        rows_.erase(rows_.begin());
+        for (auto& [k, v] : index_) if (v > 0) --v;
+    }
+
+    size_t capacity_;
+    size_t n_embd_;
+    std::vector<std::vector<float>> rows_;
+    std::unordered_map<uint64_t, size_t> index_;
+    std::vector<uint64_t> keys_;
+};
+
+}  // namespace cache
+
+
+Begin the review with the single most serious finding, then the rest in descending order of
+severity. Keep the whole review under 400 words.
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+
+```cpp
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+```
+
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+You are a code review assistant working inside a repository. Review the C++ file below for
+correctness bugs, undefined behaviour, and performance problems. Be concrete: point at the exact
+function, explain the failure, and propose the smallest fix that addresses it. Do not restate the
+code back at me. Priorities: (1) anything that corrupts memory or produces a wrong answer, (2)
+data races and lifetime bugs, (3) allocations or copies on hot paths, (4) style only if it hides a
+bug. The file compiles warning-free on gcc 13 with -Wall -Wextra, so do not report warnings the
+compiler would have found.
+
+Here is the file, src/cache/row_cache.hpp:
+
+```cpp
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+namespace cache {
+
+// A bounded LRU of token rows.  Each row is n_embd floats.
+class RowCache {
+public:
+    explicit RowCache(size_t capacity, size_t n_embd)
+        : capacity_(capacity), n_embd_(n_embd) {
+        rows_.reserve(capacity);
+    }
+
+    const float* find(uint64_t key) const {
+        auto it = index_.find(key);
+        if (it == index_.end()) return nullptr;
+        touch(it->second);
+        return rows_[it->second].data();
+    }
+
+    void insert(uint64_t key, const float* row) {
+        auto it = index_.find(key);
+        if (it != index_.end()) {
+            std::copy(row, row + n_embd_, rows_[it->second].data());
+            touch(it->second);
+            return;
+        }
+        if (rows_.size() >= capacity_) evict();
+        rows_.emplace_back(row, row + n_embd_);
+        index_[key] = rows_.size() - 1;
+    }
+
+private:
+    void touch(size_t slot) const {
+        order_.splice(order_.begin(), order_, order_.iterator_to(slot));
+    }
+    void evict() {
+        // TODO: the order list is not wired up yet; drop the oldest insert instead.
+        index_.erase(keys_.front());
+        keys_.erase(keys_.begin());
+        rows_.erase(rows_.begin());
+        for (auto& [k, v] : index_) if (v > 0) --v;
+    }
+
+    size_t capacity_;
+    size_t n_embd_;
+    std::vector<std::vector<float>> rows_;
+    std::unordered_map<uint64_t, size_t> index_;
+    std::vector<uint64_t> keys_;
+};
+
+}  // namespace cache
+
+
+Begin the review with the single most serious finding, then the rest in descending order of
+severity. Keep the whole review under 400 words.
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+
+```cpp
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+```
+
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+You are a code review assistant working inside a repository. Review the C++ file below for
+correctness bugs, undefined behaviour, and performance problems. Be concrete: point at the exact
+function, explain the failure, and propose the smallest fix that addresses it. Do not restate the
+code back at me. Priorities: (1) anything that corrupts memory or produces a wrong answer, (2)
+data races and lifetime bugs, (3) allocations or copies on hot paths, (4) style only if it hides a
+bug. The file compiles warning-free on gcc 13 with -Wall -Wextra, so do not report warnings the
+compiler would have found.
+
+Here is the file, src/cache/row_cache.hpp:
+
+```cpp
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+namespace cache {
+
+// A bounded LRU of token rows.  Each row is n_embd floats.
+class RowCache {
+public:
+    explicit RowCache(size_t capacity, size_t n_embd)
+        : capacity_(capacity), n_embd_(n_embd) {
+        rows_.reserve(capacity);
+    }
+
+    const float* find(uint64_t key) const {
+        auto it = index_.find(key);
+        if (it == index_.end()) return nullptr;
+        touch(it->second);
+        return rows_[it->second].data();
+    }
+
+    void insert(uint64_t key, const float* row) {
+        auto it = index_.find(key);
+        if (it != index_.end()) {
+            std::copy(row, row + n_embd_, rows_[it->second].data());
+            touch(it->second);
+            return;
+        }
+        if (rows_.size() >= capacity_) evict();
+        rows_.emplace_back(row, row + n_embd_);
+        index_[key] = rows_.size() - 1;
+    }
+
+private:
+    void touch(size_t slot) const {
+        order_.splice(order_.begin(), order_, order_.iterator_to(slot));
+    }
+    void evict() {
+        // TODO: the order list is not wired up yet; drop the oldest insert instead.
+        index_.erase(keys_.front());
+        keys_.erase(keys_.begin());
+        rows_.erase(rows_.begin());
+        for (auto& [k, v] : index_) if (v > 0) --v;
+    }
+
+    size_t capacity_;
+    size_t n_embd_;
+    std::vector<std::vector<float>> rows_;
+    std::unordered_map<uint64_t, size_t> index_;
+    std::vector<uint64_t> keys_;
+};
+
+}  // namespace cache
+
+
+Begin the review with the single most serious finding, then the rest in descending order of
+severity. Keep the whole review under 400 words.
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+
+```cpp
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+```
+
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+You are a code review assistant working inside a repository. Review the C++ file below for
+correctness bugs, undefined behaviour, and performance problems. Be concrete: point at the exact
+function, explain the failure, and propose the smallest fix that addresses it. Do not restate the
+code back at me. Priorities: (1) anything that corrupts memory or produces a wrong answer, (2)
+data races and lifetime bugs, (3) allocations or copies on hot paths, (4) style only if it hides a
+bug. The file compiles warning-free on gcc 13 with -Wall -Wextra, so do not report warnings the
+compiler would have found.
+
+Here is the file, src/cache/row_cache.hpp:
+
+```cpp
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+namespace cache {
+
+// A bounded LRU of token rows.  Each row is n_embd floats.
+class RowCache {
+public:
+    explicit RowCache(size_t capacity, size_t n_embd)
+        : capacity_(capacity), n_embd_(n_embd) {
+        rows_.reserve(capacity);
+    }
+
+    const float* find(uint64_t key) const {
+        auto it = index_.find(key);
+        if (it == index_.end()) return nullptr;
+        touch(it->second);
+        return rows_[it->second].data();
+    }
+
+    void insert(uint64_t key, const float* row) {
+        auto it = index_.find(key);
+        if (it != index_.end()) {
+            std::copy(row, row + n_embd_, rows_[it->second].data());
+            touch(it->second);
+            return;
+        }
+        if (rows_.size() >= capacity_) evict();
+        rows_.emplace_back(row, row + n_embd_);
+        index_[key] = rows_.size() - 1;
+    }
+
+private:
+    void touch(size_t slot) const {
+        order_.splice(order_.begin(), order_, order_.iterator_to(slot));
+    }
+    void evict() {
+        // TODO: the order list is not wired up yet; drop the oldest insert instead.
+        index_.erase(keys_.front());
+        keys_.erase(keys_.begin());
+        rows_.erase(rows_.begin());
+        for (auto& [k, v] : index_) if (v > 0) --v;
+    }
+
+    size_t capacity_;
+    size_t n_embd_;
+    std::vector<std::vector<float>> rows_;
+    std::unordered_map<uint64_t, size_t> index_;
+    std::vector<uint64_t> keys_;
+};
+
+}  // namespace cache
+
+
+Begin the review with the single most serious finding, then the rest in descending order of
+severity. Keep the whole review under 400 words.
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
+
+```cpp
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+```
+
+void worker(const cache::RowCache& c, uint64_t key, const float* fresh) {
+    const float* row = c.find(key);
+    if (row == nullptr) {
+        // publish-then-annotate: another thread may read the row before this line runs
+        const_cast<cache::RowCache&>(c).insert(key, fresh);
+        row = c.find(key);
+    }
+    accumulate(row);
+}
+
+Discuss each of the following in its own section:
+1. The eviction path: does it keep the index, the rows and the key list consistent?
+2. The touch() path: is the list even initialized anywhere? What happens on the first find()?
+3. The const-correctness of touch() given the splice it performs.
+4. The caller's const_cast and the publish-then-annotate race.
+5. The per-insert decrement loop over the whole index: complexity on a hot path, and a fix.
+6. reserve() semantics versus the bound: can rows_ grow past capacity_?
