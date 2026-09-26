@@ -202,7 +202,9 @@ print(r.choices[0].message.content)
 
 **Current limits (v1):** one request at a time; greedy decoding (temperature is ignored); images only when set up
 with them (below); no video. A conversation cache reuses the previous request's state when the new prompt extends it,
-so an ongoing chat processes only its new tokens.
+so an ongoing chat processes only its new tokens. **Temperature / top_p / top_k / seed** are honored per request
+(OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result is not reproducible run to run -
+for seed-reproducible output add `--adapt-every 100000` (static residency) to the engine arguments.
 
 ---
 
