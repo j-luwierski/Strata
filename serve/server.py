@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -125,12 +126,21 @@ class StrataEngine:
             keys += f" seed={seed}"
         return keys
 
+    def _stop(self):
+        """Cancel the running request: the engine finishes its current verify window, keeps the tokens it
+        committed, and answers `DONE ... stop` - so the GPU/CPU go idle instead of decoding to max_tokens."""
+        try:
+            self.proc.stdin.write("STOP\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            pass                               # the engine is gone; the read below raises the real error
+
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
         head = f"GENI {int(max_new)} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {}) if not embeddings else ''}"
+            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
         self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
         self.proc.stdin.flush()
         done = False
@@ -160,11 +170,7 @@ class StrataEngine:
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
                 if self.can_stop:
-                    try:
-                        self.proc.stdin.write("STOP\n")
-                        self.proc.stdin.flush()
-                    except OSError:
-                        pass
+                    self._stop()
                 while True:
                     line = self.lines.get()
                     if line is None or line.startswith("ERR"):
@@ -621,6 +627,21 @@ def make_handler(svc: Service):
         def log_message(self, fmt, *args):
             pass
 
+        def _client_gone(self) -> bool:
+            """True once the peer has closed or reset the connection (a client's Stop button aborts the
+            request).  A non-blocking MSG_PEEK sees the EOF / reset without consuming anything, and a
+            client that is merely slow to read looks alive.  Waiting for the write to fail instead costs
+            a whole socket buffer of tokens: the engine decoded 471 tokens past an abort before the first
+            EPIPE surfaced here."""
+            try:
+                if self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b"":
+                    return True                         # orderly close: EOF
+            except BlockingIOError:
+                pass                                    # nothing pending: the client is still there
+            except OSError:
+                return True                             # ECONNRESET and friends
+            return False
+
         def _json(self, code, obj):
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
@@ -699,12 +720,16 @@ def make_handler(svc: Service):
             self._sse()
             try:
                 for c in chunks:
+                    if self._client_gone():
+                        cancel.set()                             # Stop: stop the stream AND the engine
+                        break
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
                     self.wfile.flush()
-                self.wfile.write(b"data: [DONE]\n\n")
+                if not cancel.is_set():
+                    self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
@@ -720,6 +745,9 @@ def make_handler(svc: Service):
             self._sse()
             try:
                 for item in events:
+                    if self._client_gone():
+                        cancel.set()                             # Stop: stop the stream AND the engine
+                        break
                     if item is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:

@@ -44,6 +44,7 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <chrono>
 #include <algorithm>
 #include <iostream>
@@ -1813,17 +1814,50 @@ int main(int argc, char** argv) {
     //
     // and each generated token is written to stdout as `T <id>` as soon as its verify window is done, followed by
     //
-    //     DONE <generated> <prompt_tokens> <prompt_ms> <decode_ms> <stop|length>
-    //
-    // (`ERR <message>` instead when a request cannot run; `QUIT` ends the process).  Every request starts from an
-    // empty sequence (`session_zero`): the prompt goes through the batched prompt path and its last token through
-    // the first verify window - the path all three model files share.  Decoding is greedy.
+//     DONE <generated> <prompt_tokens> <prompt_ms> <decode_ms> <stop|length>
+//
+// (`ERR <message>` instead when a request cannot run; `QUIT` ends the process).  `STOP` cancels the
+// request that is running: the engine finishes the current verify window, keeps what it committed and
+// answers `DONE ... stop` - the state reflects exactly the tokens consumed, so a follow-up request
+// extends it as usual.  Every request starts from an
+// empty sequence (`session_zero`): the prompt goes through the batched prompt path and its last token through
+// the first verify window - the path all three model files share.  Decoding is greedy.
     if (o.serve) {
         if (o.spec < 2 || o.mtp.empty() || o.prefill_chunk <= 0 || thits.d_res == nullptr || host_res.empty()) {
             std::fprintf(stderr, "strata serve: needs --spec T, --mtp DIR, --prefill CHUNK, --expert-profile P and "
                                  "--expert-cache\n");
             return 2;
         }
+        // ---- the cancel path (`STOP` on stdin, `strata serve`'s one cancel primitive).  While a request
+        // runs, the main loop is inside it and not reading stdin, so a watcher thread owns the pipe until
+        // the request ends: a `STOP` line raises the flag the verify loop checks between windows and the
+        // prompt path checks at chunk boundaries; `QUIT` raises both flags and ends the process after the
+        // request.  A line that is neither waits in `pending_line` for the main loop (the next request may
+        // arrive while the current one is being cancelled - eating it here would hang the server), and end
+        // of stdin (the server died) stops the request and the process.
+        std::atomic<bool> req_stop{false}, req_quit{false};
+        bool has_pending = false;          // written by the watcher before it returns, read after the join
+        std::string pending_line;
+        auto run_watcher = [&]() {
+            std::string ctl;
+            while (std::getline(std::cin, ctl)) {
+                if (!ctl.empty() && ctl.back() == '\r') ctl.pop_back();
+                if (ctl == "STOP") {
+                    req_stop.store(true, std::memory_order_relaxed);
+                    return;
+                }
+                if (ctl == "QUIT") {
+                    req_stop.store(true, std::memory_order_relaxed);
+                    req_quit.store(true, std::memory_order_relaxed);
+                    return;
+                }
+                pending_line = std::move(ctl);
+                has_pending = true;        // the join below makes this visible to the main loop
+                return;
+            }
+            req_stop.store(true, std::memory_order_relaxed);
+            req_quit.store(true, std::memory_order_relaxed);
+        };
         strata::prefill::Prefill sp;
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
@@ -1861,6 +1895,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata serve: %s\n", err.c_str());
             return 1;
         }
+        sp.set_abort(&req_stop);
         mem_mark("the head and the prompt path");
         strata::core::Verifier ver;
         strata::core::VerifyHits vh;
@@ -1945,35 +1980,6 @@ int main(int argc, char** argv) {
             for (float& v : drive.d.usage) v *= 0.7f;
             return true;
         };
-        // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
-        // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.
-        std::atomic<bool> stop_req{false};
-        std::mutex in_mu;
-        std::condition_variable in_cv;
-        std::deque<std::string> in_lines;
-        bool in_eof = false;
-        std::thread([&] {
-            std::string l;
-            while (std::getline(std::cin, l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") { stop_req.store(true); continue; }
-                std::lock_guard<std::mutex> lk(in_mu);
-                in_lines.push_back(l);
-                in_cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(in_mu);
-            in_eof = true;
-            in_cv.notify_one();
-        }).detach();
-        auto next_line = [&](std::string& out) -> bool {
-            std::unique_lock<std::mutex> lk(in_mu);
-            in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
-            if (in_lines.empty()) return false;
-            out = std::move(in_lines.front());
-            in_lines.pop_front();
-            return true;
-        };
-        sp.should_stop = [&] { return stop_req.load(); };
         // STRATA_TRACE=1: one stderr line per step of a request (the log shows where a request stops)
         const bool trace = std::getenv("STRATA_TRACE") != nullptr;
         auto tr = [&](const char* what, long long a = -1, long long b = -1) {
@@ -2011,9 +2017,20 @@ int main(int argc, char** argv) {
         // a different prefix - resets the state and takes the full path.
         std::vector<int64_t> history;       // the tokens the session state has consumed
         std::vector<int64_t> consumed_seq;  // per-request working copy of the same
-        while (next_line(line)) {
+        for (;;) {
+            // a `QUIT` (or end of stdin) read by a watcher raised the flag while the main loop was joined
+            // on it: honour it here, or the loop would block on a getline the watcher already consumed
+            if (req_quit.load(std::memory_order_relaxed)) break;
+            // a line the previous request's watcher read and handed back (the next request, pipelined
+            // while its predecessor was being cancelled) takes precedence over a fresh read
+            if (has_pending) {
+                line = std::move(pending_line);
+                has_pending = false;
+            } else if (!std::getline(std::cin, line)) {
+                break;
+            }
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line == "QUIT") break;
-            stop_req.store(false);   // a STOP that arrived between requests is stale
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
@@ -2140,6 +2157,14 @@ int main(int argc, char** argv) {
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
             if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
+            // committed: from here the request runs, so stdin moves to the watcher; it joins when the
+            // request's scope ends (DONE, error return, or a mid-request `continue`), handing stdin back
+            req_stop.store(false, std::memory_order_relaxed);
+            std::thread watcher(run_watcher);
+            struct WatcherJoin {
+                std::thread* t;
+                ~WatcherJoin() { if (t->joinable()) t->join(); }
+            } watcher_join{&watcher};
             cur = ids;
             // ---- the history cache: reuse the session state when this request strictly extends the
             // tokens the state already consumed
@@ -2179,15 +2204,12 @@ int main(int argc, char** argv) {
                                    : (unsigned long long) std::chrono::steady_clock::now().time_since_epoch().count();
             req_sp.counter = 0;
             ver.set_sampling(req_sp);
-            bool cancelled = false;
+            const int64_t stats_tokens0 = sp.stats().tokens;   // cumulative counter: the delta is this run
             tr("prompt start", n - 1);
             if (n - 1 > consumed && !sp.run(ids.data() + consumed, n - 1 - consumed, consumed, err)) {
-                if (!stop_req.load()) {
-                    std::fprintf(stderr, "strata serve: %s\n", err.c_str());
-                    std::printf("ERR %s\n", err.c_str());
-                    return 1;
-                }
-                cancelled = true;   // stopped while reading the prompt: refill the lent slots below, then DONE cancel
+                std::fprintf(stderr, "strata serve: %s\n", err.c_str());
+                std::printf("ERR %s\n", err.c_str());
+                return 1;
             }
             for (const auto& [i, slot] : lent_now) {
                 const uint8_t* b = srcp->blob(i / g.n_expert, i % g.n_expert);
@@ -2200,6 +2222,17 @@ int main(int argc, char** argv) {
             }
             if (!lent_now.empty())
                 cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+            // cancelled during the prompt: the state consumed exactly ids[0..done), so key the history on
+            // that prefix and answer at once - a follow-up request that extends the prompt resumes from it
+            if (sp.run_aborted()) {
+                consumed_seq.assign(ids.begin(), ids.begin() + (sp.stats().tokens - stats_tokens0));
+                history = consumed_seq;
+                const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
+                std::printf("DONE 0 %lld %.1f 0.0 stop\n", (long long) n, prompt_ms);
+                std::fflush(stdout);
+                if (req_quit.load(std::memory_order_relaxed)) break;
+                continue;
+            }
             tr("prompt done (slots refilled)");
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
             // the verify windows: the first holds the last prompt token alone
@@ -2211,8 +2244,9 @@ int main(int argc, char** argv) {
             int64_t produced_n = 0;
             const char* finish = "length";
             const Clock::time_point d0 = Clock::now();
-            if (cancelled) finish = "cancel";
-            while (!cancelled && produced_n < max_new) {
+            // a `STOP` ends the loop between windows: the round in flight commits first, so the state and
+            // `consumed_seq` stay exactly what was emitted (the eos path below does the same)
+            while (produced_n < max_new && !req_stop.load(std::memory_order_relaxed)) {
                 int T = S;
                 if (o.spec_min_p > 0.0) {
                     T = 1;
@@ -2266,10 +2300,10 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 if (eos) { finish = "stop"; break; }
-                if (stop_req.load()) { finish = "cancel"; break; }
                 x = outv[(size_t) a];
                 p += a + 1;
             }
+            if (req_stop.load(std::memory_order_relaxed) && produced_n < max_new) finish = "stop";
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
             history = consumed_seq;   // the state now reflects exactly these tokens
             std::fprintf(stderr, "strata serve: history cache: %lld prompt tokens reused, %lld processed\n",
@@ -2278,8 +2312,11 @@ int main(int argc, char** argv) {
                         finish);
             std::fflush(stdout);
             std::fprintf(stderr, "strata serve: %lld prompt tokens in %.0f ms (%.1f tok/s), %lld generated in %.0f ms "
-                                 "(%.1f tok/s)\n", (long long) n, prompt_ms, prompt_ms > 0 ? 1000.0 * n / prompt_ms : 0.0,
-                         (long long) produced_n, decode_ms, decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0);
+                                 "(%.1f tok/s)%s\n", (long long) n, prompt_ms,
+                         prompt_ms > 0 ? 1000.0 * n / prompt_ms : 0.0,
+                         (long long) produced_n, decode_ms, decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0,
+                         req_stop.load(std::memory_order_relaxed) && produced_n < max_new ? "  [stopped]" : "");
+            if (req_quit.load(std::memory_order_relaxed)) break;
         }
         return 0;
     }

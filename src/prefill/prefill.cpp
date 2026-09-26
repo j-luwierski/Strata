@@ -253,6 +253,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
     const auto t_start = Clock::now();
+    run_aborted_ = false;
     strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
     s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
     s.idx_dim = g.idx_key_dim;
@@ -261,6 +262,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
 
     for (int64_t c0 = 0; c0 < n; c0 += m.T) {
+        // the serve path's cancel: stop at the chunk boundary.  Everything below leaves the state
+        // consistent for exactly the positions processed so far (ple_prev included), so the caller
+        // can key its history on that prefix and a follow-up request resumes from it.
+        if (abort_ != nullptr && abort_->load(std::memory_order_relaxed)) {
+            run_aborted_ = true;
+            break;
+        }
         if (should_stop && should_stop()) { err = "cancelled"; return false; }
         if (std::getenv("STRATA_TRACE")) { std::fprintf(stderr, "strata trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
         const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;

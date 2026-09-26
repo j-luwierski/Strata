@@ -16,6 +16,7 @@
 #include "strata/core/session.hpp"
 #include "strata/core/weights.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -57,6 +58,12 @@ public:
 
     const PrefillStats& stats() const { return stats_; }
 
+    /// The serve path's cancel: when this flag goes true, `run` stops at the next chunk boundary and
+    /// `run_aborted()` reports it.  The state then reflects exactly the positions [pos0, pos0 + processed)
+    /// - the caller keys its history on that prefix, so a follow-up request can resume from it.
+    void set_abort(std::atomic<bool>* flag) { abort_ = flag; }
+    bool run_aborted() const { return run_aborted_; }
+
     /// Plan v0.3 P6: called after every chunk with the chunk's final multi-stream residual rows (device,
     /// T x hc*n_embd, valid until the next chunk) and the chunk's first position; the MTP draft layer builds its
     /// K/V from them.  The prefill stream is synchronized before the call.
@@ -73,6 +80,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     PrefillStats stats_;
+    std::atomic<bool>* abort_ = nullptr;
+    bool run_aborted_ = false;
 };
 
 }  // namespace strata::prefill
