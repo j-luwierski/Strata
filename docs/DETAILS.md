@@ -207,7 +207,10 @@ so an ongoing chat processes only its new tokens. **Temperature / top_p / top_k 
 for seed-reproducible output add `--adapt-every 100000` (static residency) to the engine arguments.  The run config's
 optional `sampling` block sets the defaults for requests that leave the fields out (`"sampling": {"temperature": 1.0,
 "top_p": 0.95, "top_k": 20}`); a request's own fields always win, and with no block at all a request without sampling
-keys decodes greedy.
+keys decodes greedy.  `min_p` and the penalties (`presence_penalty`, `frequency_penalty`, `repetition_penalty`, with
+`penalty_last_n` capping how many recent tokens they count over, default 64 when any penalty is set) ride the same
+path; they count the tokens the request has consumed, so a repetition penalty suppresses what the model itself just
+said, not the prompt alone.
 
 ---
 
