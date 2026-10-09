@@ -83,6 +83,9 @@ struct GdnBuffers {
     uint8_t* y_q8_0 = nullptr;     ///< value_dim, block_q8_0
 
     // the recurrent state, which outlives the call
+#ifdef STRATA_ENABLE_STEPQUANT
+    float* stepquant_scratch = nullptr; // shared FP32 matrix; persistent states live in packed session slots
+#endif
     float* state = nullptr;        ///< S * h_v * S
     float* conv_state = nullptr;   ///< conv_channels * (d_conv-1)
 };

@@ -14,6 +14,9 @@
 // AND IT IS PHASE 2, so hit rate is `h = 0` and the number it prints is slow on purpose
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
+#ifdef STRATA_ENABLE_STEPQUANT
+#include "strata/kernels/stepquant.hpp"
+#endif
 #include "strata/platform/memory.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/dma_batch.hpp"
@@ -571,6 +574,9 @@ struct Options {
     bool spec_split = false;   ///< opt-in split verify window (the overlap study: exact, ~7% slower)
     /// --serve, multi-GPU layer split: "K" or "K1,K2,.." (the first layer of each later stage) or "auto" (placed
     /// from each GPU's free VRAM); empty = one GPU
+#ifdef STRATA_ENABLE_STEPQUANT
+    std::string stepquant_plan;
+#endif
     std::string layer_split;
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
     /// GPU, sharing everything - the bit-exact A/B of the hand-off)
@@ -645,6 +651,9 @@ struct Options {
 };
 
 void usage() {
+#ifdef STRATA_ENABLE_STEPQUANT
+    std::fprintf(stderr, "  --stepquant-plan FILE  experimental packed GDN state (requires --spec 0)\n");
+#endif
     std::fprintf(stderr,
                  "strata generate --pack DIR --tokens \"1,2,3\" [options]\n"
                  "\n"
@@ -1629,6 +1638,9 @@ int main(int argc, char** argv) {
         bool parsed = true;
         if (a == "--help" || a == "-h") { usage(); return 0; }
         else if (a == "--gpu") { (void) next("--gpu"); }   // applied at startup, before any CUDA call
+#ifdef STRATA_ENABLE_STEPQUANT
+        else if (a == "--stepquant-plan") o.stepquant_plan = next("--stepquant-plan");
+#endif
         else if (a == "--pack") o.pack = next("--pack");
         else if (a == "--tokens") {
             if (have_tokens) { std::fprintf(stderr, "supply one token input only\n"); return 2; }
@@ -2198,6 +2210,16 @@ int main(int argc, char** argv) {
         if (o.mtp_max_t == 0) o.mtp_max_t = o.spec;
         o.spec = std::max(o.spec, std::min(o.mtp_max_t + o.lookup_chain, 8));   // kVerifyMaxT
     }
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (!o.stepquant_plan.empty() && o.serve) {
+        std::fprintf(stderr, "strata: --stepquant-plan currently supports generate only; --serve uses the unsupported verifier path\n");
+        return 2;
+    }
+    if (!o.stepquant_plan.empty() && (o.spec >= 2 || o.batch > 0 || !o.layer_split.empty() || o.pipeline_windows > 0)) {
+        std::fprintf(stderr, "strata: --stepquant-plan currently requires --spec 0, no --batch, --layer-split or --pipeline-windows\n");
+        return 2;
+    }
+#endif
     strata::core::layer_set_shared_early(!o.shared_late);
     if (!o.native_preset.empty()) {
         try {
@@ -2479,6 +2501,19 @@ int main(int argc, char** argv) {
                      : std::getenv("STRATA_NO_IQ256") == nullptr ? "AVX-2" : "ggml-cpu vec_dot (STRATA_NO_IQ256 set)");
     strata::core::ModelGeometry g;   // canonical defaults; the model file overrides the MoE shape below
     int64_t K = 10;
+#ifdef STRATA_ENABLE_STEPQUANT
+    // Created before weights/session arenas and graphs, so the cache planner sees its scratch memory.
+    struct StepQuantCleanup { ~StepQuantCleanup() { strata::kernels::stepquant_release(); } } stepquant_cleanup;
+    if (!o.stepquant_plan.empty()) {
+        try {
+            strata::kernels::stepquant_configure(o.stepquant_plan, (int) g.n_layers, (int) g.qsa_interval,
+                                                (int) g.ssm_v_heads, (int) g.ssm_state_size);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata: %s\n", e.what()); return 2;
+        }
+        std::fprintf(stderr, "strata: STEPQuant: packed per-layer GDN state, one FP32 scratch matrix; experimental plain decode\n");
+    }
+#endif
     // THE ROPE CONFIG RESOLVES HERE, BEFORE ANY WEIGHT MOVES - the CLI and the model file have both spoken,
     // and `session_init` below builds the rope table from it and captures the kernels reading its constants
     // (rope_scaling.hpp); the only hard constraint is "set before that", and dying on a bad rope key beats
