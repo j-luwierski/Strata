@@ -1,0 +1,15 @@
+A research group measured rainfall in a small valley. Each morning the observer checked the gauge, recorded the amount in millimetres, and noted whether the wind came from the sea. The first week was dry, but a cold front brought several days of steady rain. To compare the two periods fairly, the group used the same instrument and the same observation time. They kept the raw readings as well as the weekly averages. An average alone cannot show whether rain fell evenly or during one short storm.
+
+A programmer stores customer orders in a table with columns for an identifier, a date, and a total. The identifier must be unique. A query that groups by date and sums the total returns daily revenue. Missing values should be handled explicitly. In Python, a dictionary maps a key to a value, while a list preserves an ordered sequence. Consider this function:
+def count_words(text):
+    counts = {}
+    for word in text.split():
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+The function visits each word once. A test should include repeated words, an empty string, and punctuation. Sorting the keys makes the printed result deterministic, but does not change the counts.
+
+If a train travels 90 kilometres in one and a half hours, its average speed is 60 kilometres per hour. If a shop reduces a price of 240 by twenty percent, the discount is 48 and the new price is 192. Multiplication distributes over addition: three times the sum of four and five equals the sum of twelve and fifteen. A probability must lie between zero and one. Independent events with probabilities one half and one third occur together with probability one sixth. These calculations require keeping the units and the assumptions consistent.
+
+W bibliotece katalog opisuje książki, a numery inwentarzowe oznaczają konkretne egzemplarze. Czytelnik może zarezerwować tytuł, nawet kiedy wszystkie egzemplarze są wypożyczone. Bibliotekarka sprawdza datę zwrotu i zapisuje rezerwację. Gdy książka wróci, pierwszy czytelnik w kolejce otrzyma powiadomienie. Dobrze zaprojektowany system odróżnia autora, tytuł i egzemplarz. Nie wolno utożsamiać liczby tytułów z liczbą książek na półkach.
+
+Energy is conserved in an isolated system. A falling object loses gravitational potential energy and gains kinetic energy. Air resistance transfers some energy into heat. Measuring the height and speed helps test the model, but a useful report must also state the measurement uncertainty. An experiment repeated under identical conditions may still produce slightly different readings. A conclusion should distinguish the measured result from an explanation proposed to account for it.

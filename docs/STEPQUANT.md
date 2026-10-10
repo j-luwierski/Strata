@@ -35,7 +35,8 @@ Convolution, PLE and QSA states retain their existing formats and precision.
 Checkpoints and disk sessions preserve packed bytes. Each slot carries the
 plan fingerprint and payload size; restore rejects a different calibration
 plan before writing device state. A checkpoint from the FP32 mode is not a
-checkpoint for this mode. No speed or task-quality result is claimed.
+checkpoint for this mode. The full-model teacher-forced quality measurement
+is linked below; no production speed result is claimed.
 
 The engine supports plain decode, speculative verification, the Python server,
 batched independent sessions, layer splits and pipeline snapshots. Verification
@@ -56,6 +57,65 @@ of the fit and reconstruction with the same shared host runtime. CUDA was built
 and tested here. HIP/MI50 and SYCL source support has been added, but their builds
 could not be run in this environment: ROCm and `icx`/`icpx` are absent. They need
 backend compilation and device validation before being considered validated.
+
+## Through the normal installer
+
+Run `./setup.sh --setup` to choose STEPQuant with the other model settings.
+Its default is **off** on a fresh installation. After choosing it, choose
+calibration or an existing Strata text plan. Calibration offers a 4/6-bit
+nominal budget, 0/16/32/64 FP16 pivot heads, a 512/2048/8192-token lifetime
+horizon, and the bundled text or a custom UTF-8 text file. Flags accept other
+nonnegative pivot counts and positive horizons; impossible pivot budgets are
+rejected. These settings determine the calibration objective. The calibration
+then fits row impact, per-head precision and the identities of pivot heads.
+It does not search for a best bit budget or lifetime horizon.
+
+For a model already installed, the flags update just its STEPQuant settings;
+the model weights are reused. When several models are installed, setup asks
+which one (with `--yes`, the first listed model).
+
+```sh
+# Enable and calibrate with defaults: 6 bits, 32 pivot heads, horizon 2048.
+./setup.sh --stepquant on --yes --no-start
+# Recalibrate with choices and your own representative text.
+./setup.sh --stepquant on --stepquant-bits 4 --stepquant-pivots 16 \
+  --stepquant-horizon 2048 --stepquant-corpus /path/to/text.txt \
+  --stepquant-recalibrate --yes --no-start
+# Import a plan calibrated for these exact weights, or return to FP32 state.
+./setup.sh --stepquant-plan /path/to/checkpoint.plan --yes --no-start
+./setup.sh --stepquant off --yes --no-start
+```
+
+NVIDIA and Linux AMD source builds enable `STRATA_ENABLE_STEPQUANT` when
+selected. The compiled capability is remembered in `engine/BUILD.json` and
+kept across source updates. Disabling the model's runtime plan returns it to
+FP32 state. Windows AMD requires a `--prebuilt` engine containing STEPQuant;
+Intel requires an existing SYCL build with the CMake option enabled. Setup
+checks those engines before using them. The Intel adapter maps plan and trace
+paths through its normal `/work` mount and uses a separate container name for
+calibration. HIP and SYCL device execution remain unvalidated here.
+
+Collection uses the first selected GPU, one unquantized prompt and at most
+512 updates per layer. Text is capped at 513 input tokens; at least nine are
+required. Setup removes batching, pipeline and KV streaming options from this
+short collection process. Offline fitting needs NumPy, already in setup's
+Python dependencies. The full IQ3_XXS model's temporary traces occupied about
+7.1 GiB here; they are deleted after fitting. The bundled text is a starting
+corpus, not evidence that it suits every workload.
+
+Plans and JSON calibration reports live in the shared data folder under
+`stepquant/strata-<model>/`. Plan filenames include a content hash. Setup saves
+`stepquant_plan` and the chosen calibration settings in the usual model JSON.
+It checks geometry and trace completeness and writes the model config only
+after calibration succeeds. A failed or interrupted collection keeps the
+previous config and plan. An unchanged saved plan is reused; changing
+calibration options or `--stepquant-recalibrate` collects it again. Explicitly
+imported plans must belong to the exact checkpoint; geometry checks alone
+cannot establish that.
+
+A plain subsequent `./setup.sh` starts with the saved plan. `--yes` on a fresh
+installation keeps STEPQuant off unless a STEPQuant flag explicitly enables
+it. The Windows launcher forwards the same options to `setup.py`.
 
 ## Build and use
 
@@ -174,7 +234,9 @@ a temporary packed slot for speculative recurrence. The test also saves,
 validates, corrupts and restores a running checkpoint. GPU graph replay, independent/range sessions, every accepted-prefix length,
 invalid plans, bounded traces and zero/pivot states pass.
 
-No task-quality benchmark or other GPU backend has been validated. With the STEPQuant blocks disabled, every changed engine source and
+A full-model teacher-forced quality comparison is recorded in
+[the RTX 4070 Ti SUPER report](../bench/results/2026-10-10-stepquant-rtx4070ti-super/README.md).
+Task benchmark scores and other GPU backends have not been validated. With the STEPQuant blocks disabled, every changed engine source and
 the GDN buffer declaration are byte-identical to this branch's `origin/main`
 base; `test_stepquant_default.py` checks that explicitly.
 

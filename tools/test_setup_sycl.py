@@ -168,6 +168,15 @@ class ToSycl(unittest.TestCase):
         self.assertEqual(c["env"]["STRATA_VERIFY_NO_HOST"], "0")
         self.assertEqual(c["env"]["STRATA_SYCL_BIN"], "build-sycl/strata")
 
+    def test_stepquant_plan_uses_the_container_mount(self):
+        m = self.mod()
+        cfg = self.cfg(m)
+        cfg["stepquant_plan"] = str(m.MOUNT / "data" / "stepquant" / "state.plan")
+        cfg["stepquant"] = {"bits": 6, "pivots": 32}
+        c = m.to_sycl(cfg, m.ROOT / "build-sycl-aot" / "strata", 64.0, {}, 32.0, "xe")
+        self.assertEqual(c["stepquant_plan"], "/work/data/stepquant/state.plan")
+        self.assertEqual(c["stepquant"], cfg["stepquant"])
+
     def test_small_card_rule(self):
         m = self.mod()
         self.assertTrue(m.small_card(8.0, "i915"))

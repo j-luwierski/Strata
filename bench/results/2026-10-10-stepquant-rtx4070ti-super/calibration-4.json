@@ -1,0 +1,17 @@
+{
+  "bits": 4,
+  "pivots": 32,
+  "horizon": 2048,
+  "corpus": "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata/data/stepquant-calibration.txt",
+  "model": "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata-data/models/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "tokens": 512,
+  "corpus_sha256": "2627c74a3bdb69192fe659e2baa547ce4660b2956f34a36b80a91d336d5d324f",
+  "plan_sha256": "51c98483d569b5de09243ad68bdc10c7ab20dd1bd409d253d500e74077eb82d8",
+  "head_counts": {
+    "2": 728,
+    "4": 480,
+    "6": 312,
+    "8": 176,
+    "16": 32
+  }
+}

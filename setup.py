@@ -2469,7 +2469,7 @@ def hipblaslt_table(arch, lib_dirs, ver=None):
     return None
 
 
-def build_engine_hip(gpu, llama, vision="none") -> Path:
+def build_engine_hip(gpu, llama, vision="none", stepquant=False) -> Path:
     """Compile the HIP engine for this AMD GPU into engine/ (again only when its source changed: a `git pull`).
     gpu["archs"]: every architecture it needs code for (the cards of a layer split), else gpu["arch"].  vision "cpu"
     (#304): the image encoder too, for the CPU (there is no HIP encoder build yet)."""
@@ -2477,12 +2477,13 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+    stepquant = stepquant or bool(meta.get("stepquant"))
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
     archs = sorted(set(gpu.get("archs") or [gpu["arch"]]))
     has_archs = set(archs) <= set(meta.get("archs", []))
     floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
     engine_ok = meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs and \
-        (meta.get("isa_floor") or "") == floor
+        (meta.get("isa_floor") or "") == floor and (not stepquant or meta.get("stepquant"))
     vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc)
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -2506,6 +2507,7 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
              "10-20 minutes, once) ...")
     cmake_build(ROOT, ROOT / "build-hip", "strata",
                 ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
+                 f"-DSTRATA_ENABLE_STEPQUANT={'ON' if stepquant else 'OFF'}",
                  "-DSTRATA_PREFILL_MMQ=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
@@ -2513,7 +2515,7 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
                  f"-DSTRATA_GGML_DIR={llama}", *isa_floor_defs(floor, ROOT / "build-hip", meta)], None, "")
     shutil.copy2(ROOT / "build-hip" / EXE, eng / EXE)
     meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs, "vision": "none",
-            "lib_dirs": dirs, "src": src, **({"isa_floor": floor} if floor else {})}
+            "lib_dirs": dirs, "src": src, **({"stepquant": True} if stepquant else {}), **({"isa_floor": floor} if floor else {})}
     if vision != "none":
         return build_vision_cpu(eng, stamp, meta, llama, vsrc)
     stamp.write_text(json.dumps(meta, indent=1))
@@ -3180,7 +3182,7 @@ def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
     return vision
 
 
-def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
+def build_engine(gpu, vision, yes, llama, toolkit=None, stepquant=False) -> Path:
     """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
     engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes.
     toolkit 12 (default: 12 for a card older than CUDA 13 supports): the experimental CUDA 12 engine, in
@@ -3192,6 +3194,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+    stepquant = stepquant or bool(meta.get("stepquant"))
     want_vision = vision != "none"
     local = meta.get("source") == "local"
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
@@ -3202,7 +3205,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     new_arch = local and not set(archs) <= built
     floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
     engine_ok = local and (eng / EXE).exists() and meta.get("src") == src and not new_arch and \
-        (meta.get("isa_floor") or "") == floor
+        (meta.get("isa_floor") or "") == floor and (not stepquant or meta.get("stepquant"))
     vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -3218,7 +3221,8 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
             "  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, bdir, "strata",
-                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
+                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
+                     f"-DSTRATA_ENABLE_STEPQUANT={'ON' if stepquant else 'OFF'}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), f"-DSTRATA_GGML_DIR={llama}",
                      *engine_defs(archs, toolkit),
                      *isa_floor_defs(floor, bdir, meta)],
@@ -3238,7 +3242,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     dirs = [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()]
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs,
                                  "vision": vision, **({"toolkit": 12} if t12 else {}),
-                                 "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None,
+                                 "cuda_dirs": dirs, "src": src, **({"stepquant": True} if stepquant else {}), "vision_src": vsrc if want_vision else None,
                                  **({"isa_floor": floor} if floor else {})}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
@@ -3650,7 +3654,7 @@ def write_config(path: Path, cfg: dict):
 # #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
 # "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
-                        "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
+                        "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision", "stepquant", "stepquant_plan"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP"})   # the "env" entries setup writes
 SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
 
@@ -4444,7 +4448,8 @@ def ensure_engine_for(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     main = gpu_info(cards[0]["index"])
     archs = sorted({int(x) for x in meta.get("archs", [])} | {int(g["arch"]) for g in cards})
     vision = meta.get("vision") or ("gpu" if (eng / VEXE).exists() else "none")
-    build_engine({**main, "archs": archs}, vision, yes, get_llama_cpp(), toolkit=tk)
+    build_engine({**main, "archs": archs}, vision, yes, get_llama_cpp(), toolkit=tk,
+                 **({"stepquant": True} if cfg.get("stepquant_plan") or "--stepquant-plan" in cfg["args"] else {}))
     dirs = json.loads(info.read_text(encoding="utf-8")).get("cuda_dirs") or []
     cfg["lib_dirs"] = dirs + [d for d in cfg.get("lib_dirs") or [] if d not in dirs]
     write_config(cfg_path, cfg)
@@ -4477,8 +4482,11 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
          "CUDA 12 engine (docs/OLDER_GPUS.md; START-HERE.bat --setup --cuda 13 and newer cards only moves it back)")
     main = gpu_info(cards[0]["index"]) or cards[0]
     vision = "gpu" if cfg.get("vision") else "none"
-    eng = get_cuda12_engine(os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL),
-                            {**main, "archs": sorted({int(g["arch"]) for g in cards})}, vision, yes)
+    gpu = {**main, "archs": sorted({int(g["arch"]) for g in cards})}
+    if cfg.get("stepquant_plan") or "--stepquant-plan" in cfg["args"]:
+        eng = build_engine(gpu, vision, yes, get_llama_cpp(), toolkit=12, stepquant=True)
+    else:
+        eng = get_cuda12_engine(os.environ.get("STRATA_PREBUILT_URL", PREBUILT_URL), gpu, vision, yes)
     cfg["exe"] = str(eng / EXE)
     cfg["cuda"] = 12
     cfg["lib_dirs"] = engine_lib_dirs(eng, 12)
@@ -4543,6 +4551,55 @@ def resolve_rope(ctx: int, scaling, scale, trained: int = 262144):
 
 
 # ------------------------------------------------------------------------------------------------ main
+def stepquant_host_config(cfg):
+    return cfg
+
+
+def stepquant_store_config(cfg):
+    return cfg
+
+
+def stepquant_trace_command(cfg, args):
+    return [cfg["exe"], *args]
+
+
+def stepquant_capability(exe, cfg):
+    from tools.stepquant_setup import engine_env
+    env = engine_env(cfg)
+    if cfg.get("backend") == "sycl" or str(exe).endswith("strata-sycl.sh"):
+        env["STRATA_SYCL_NAME"] = f"strata-stepquant-check-{os.getpid()}"
+    r = subprocess.run([exe, "--help"], cwd=cfg.get("cwd"), env=env,
+                       capture_output=True, text=True)
+    if "--stepquant-plan" not in r.stdout + r.stderr:
+        raise ValueError("this engine was built without STEPQuant; build with -DSTRATA_ENABLE_STEPQUANT=ON")
+
+
+def stepquant_engine(cfg, yes):
+    """Enable the build capability for an installed model without preparing its weights again."""
+    if cfg.get("backend") == "sycl":
+        stepquant_capability(cfg["exe"], cfg)
+        return
+    hip = cfg.get("backend") == "hip"
+    index = cfg.get("gpu", 0)
+    indices = index if isinstance(index, list) else [index]
+    if hip and WIN:
+        stepquant_capability(cfg["exe"], cfg)
+        return
+    cards = [g for g in (amd_gpus() if hip else gpus()) if g["index"] in indices]
+    if not cards:
+        raise ValueError("no installed-model GPU found for the STEPQuant build")
+    gpu = {**cards[0], "archs": [g["arch"] for g in cards]}
+    vis = cfg.get("vision")
+    vision = ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none"
+    eng = build_engine_hip(gpu, get_llama_cpp(), vision, stepquant=True) if hip else build_engine(
+        gpu, vision, yes, get_llama_cpp(), toolkit=config_toolkit(cfg), stepquant=True)
+    cfg["exe"] = str(eng / EXE)
+    meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
+    cfg["lib_dirs"] = meta.get("lib_dirs") or meta.get("cuda_dirs") or []
+    if vis:
+        vis["exe"] = str(eng / VEXE)
+
+
 def sycl_setup(argv) -> int:
     """--backend sycl: the Intel Arc engine (the SYCL port in sycl/, PR #423), experimental. There is no ready-made
     Intel engine: it is compiled from source on the PC (docs/INTEL_ARC.md), then sycl/setup_intel.py runs this setup
@@ -4669,7 +4726,10 @@ def main() -> int:
                          "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use), "
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
+    from tools import stepquant_setup as SQP
+    SQP.arguments(ap)
     a = ap.parse_args()
+    SQP.validate_arguments(a, ap)
     if a.source:
         os.environ["STRATA_SOURCE"] = a.source
     if a.inspect:                                      # headers only: nothing is installed
@@ -4734,6 +4794,24 @@ def main() -> int:
     # choice, and asked once when the PC has cards that could share the model
     run_gpu = start_gpus(a.gpus) or a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
+    if have and SQP.requested(a) and not (a.setup or a.model or a.family or a.check):
+        pick_cfg = have[0]
+        if len(have) > 1:
+            for i, c in enumerate(have, 1):
+                say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
+            pick_cfg = have[int(ask("STEPQuant for which model?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
+        cfg = stepquant_host_config(json.loads(pick_cfg.read_text(encoding="utf-8-sig")))
+        try:
+            choice = SQP.choose(sys.modules[__name__], a, cfg)
+            if choice:
+                stepquant_engine(cfg, a.yes)
+            SQP.apply(sys.modules[__name__], cfg, choice, data / "stepquant" / pick_cfg.stem)
+        except (ValueError, OSError) as e:
+            fail(f"STEPQuant setup failed: {e}", "the installed model configuration was not changed")
+        write_setup_config(pick_cfg, stepquant_store_config(cfg))
+        return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
+            keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                  "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if have and a.calibrate and not (a.setup or a.model or a.family or a.check):
         if not a.build:
             update_installed_engine(a.prebuilt)
@@ -5205,6 +5283,16 @@ def main() -> int:
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
              "use --models-dir on a bigger drive")
 
+    previous = ROOT / f"strata-{tag.lower()}.json"
+    previous = previous if previous.exists() else adopted
+    old_sq = stepquant_host_config(json.loads(previous.read_text(encoding="utf-8-sig"))) if previous else {}
+    try:
+        sq_choice = SQP.choose(sys.modules[__name__], a, old_sq)
+    except (ValueError, OSError) as e:
+        fail(f"STEPQuant choices: {e}", "check the plan or calibration text path and run setup again")
+    if sq_choice:
+        ok("STEPQuant: source engine with packed GDN state support")
+
     # ---- 3. python packages
     step(3, "Python packages")
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
@@ -5223,7 +5311,7 @@ def main() -> int:
         gpu = hip_card(eng, gpu, amd)
         a.gpu = gpu["index"] if gpu["count"] > 1 else a.gpu
     else:
-        eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
+        eng = None if a.build or hip or sq_choice else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
                                                                                     else {}))
     if eng is not None and not hip and json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("source") != "local":
         pip_cuda_libs(cuda_tk)
@@ -5233,7 +5321,13 @@ def main() -> int:
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text(encoding="utf-8")), gpu, vision)
     if eng is None:
-        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
+        try:
+            eng = build_engine_hip(gpu, llama, vision, **({"stepquant": True} if sq_choice else {})) if hip else build_engine(
+                gpu, vision, a.yes, llama, toolkit=cuda_tk, **({"stepquant": True} if sq_choice else {}))
+        except ValueError as e:
+            if not sq_choice:
+                raise
+            fail(f"STEPQuant engine: {e}", "build the backend with -DSTRATA_ENABLE_STEPQUANT=ON, then run setup again")
     meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
     if hip and WIN:                                    # the ready-made engine's rocm/bin, first on the engine's PATH
         lib_dirs = [str(d) for d in hip_lib_dirs(eng)]
@@ -5244,6 +5338,11 @@ def main() -> int:
     if budget is not None and engine_ver < need_engine:      # checked before the 94-111 GB download
         fail(f"{model} needs engine {'.'.join(map(str, need_engine))} or newer; this one is {meta.get('version')}",
              "update Strata (or compile the engine with --build) and run setup again")
+    if sq_choice and hip and WIN:
+        try:
+            stepquant_capability(str(eng / EXE), {"lib_dirs": lib_dirs})
+        except ValueError as e:
+            fail(str(e), "use --prebuilt with a HIP engine built with STEPQuant support")
     ok(f"engine: {eng / EXE}")
 
     # ---- 5. the model files
@@ -5517,6 +5616,10 @@ def main() -> int:
             say("  " + line)
     for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN):
         say("  " + line)
+    try:
+        SQP.apply(sys.modules[__name__], cfg, sq_choice, data / "stepquant" / cfg_path.stem)
+    except (ValueError, OSError) as e:
+        fail(f"STEPQuant calibration failed: {e}", "the model configuration was not changed; fix the problem and run setup again")
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it

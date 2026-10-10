@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-10",
+  "gpu": "NVIDIA RTX 4070 Ti SUPER (16376 MiB)",
+  "driver": "610.57.04",
+  "cuda": "13.4",
+  "cpu": "AMD Ryzen 9 5900X",
+  "ram_gib": 125,
+  "model": "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS (all 48 layers, 36 GDN layers)",
+  "calibration_tokens": 512,
+  "heldout_tokens": 1072,
+  "scored_tokens": 880,
+  "fixed_expert_cache": 4000,
+  "actual_profile_slots": 5357,
+  "pcie_frac": 0,
+  "baseline_logprobs_byte_identical": true,
+  "baseline_perplexity": 5.142866651595602,
+  "stepquant_6_perplexity": 5.130533403367544,
+  "stepquant_4_perplexity": 5.2008181197597345,
+  "top1_agreement_6": 0.9511363636363637,
+  "top1_agreement_4": 0.8954545454545455,
+  "perplexity_ratio_6": 0.9976018728340483,
+  "perplexity_ratio_4": 1.0112683201976767
+}

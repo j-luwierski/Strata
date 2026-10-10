@@ -137,7 +137,7 @@ def to_sycl(cfg: dict, exe: Path, ram: float, keep: dict, vram_gb: float = 0.0, 
     for f in ("--resident-experts", "--mmap-experts"):  # setup's low-RAM mode is the CUDA engine's
         drop(args, f)
     drop(args, "--kv-resident", True)                   # decided below on the real RAM
-    for f in ("--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp", "--control-vector-scaled"):
+    for f in ("--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp", "--stepquant-plan", "--control-vector-scaled"):
         if f in args:
             v = args[args.index(f) + 1]
             path, _, scale = v.rpartition(":") if f == "--control-vector-scaled" else (v, "", "")
@@ -178,6 +178,8 @@ def to_sycl(cfg: dict, exe: Path, ram: float, keep: dict, vram_gb: float = 0.0, 
         env["STRATA_SYCL_ROOT"] = str(MOUNT)
     if env:
         out["env"] = env
+    if out.get("stepquant_plan"):
+        out["stepquant_plan"] = sycl_path(out["stepquant_plan"])
     out.update(keep)
     return out
 
@@ -231,7 +233,48 @@ def install(argv) -> None:
     S.amd_gpus = lambda *a, **k: intel
     S.amd_problem = lambda g: None
     S.hip_vision = lambda asked: "none"                 # images are not wired on the SYCL port yet
-    S.build_engine_hip = lambda *a, **k: stub
+    sycl_env = {}
+    if exe != ROOT / "build-sycl-aot" / "strata":
+        sycl_env["STRATA_SYCL_BIN"] = exe.relative_to(ROOT).as_posix()
+    if MOUNT.resolve() != ROOT.parent.resolve():
+        sycl_env["STRATA_SYCL_ROOT"] = str(MOUNT)
+
+    def stepquant_sycl_build(*a, **k):
+        if k.get("stepquant"):
+            S.stepquant_capability(str(SYCL_WRAPPER), {"env": sycl_env})
+        return stub
+    S.build_engine_hip = stepquant_sycl_build
+
+    def host_path(path):
+        return str(MOUNT / str(path)[len("/work/"):]) if str(path).startswith("/work/") else path
+
+    def host_config(cfg):
+        cfg = dict(cfg)
+        args = list(cfg["args"])
+        for f in ("--pack", "--native", "--ple-gguf", "--expert-profile", "--mtp", "--stepquant-plan"):
+            if f in args:
+                args[args.index(f) + 1] = host_path(args[args.index(f) + 1])
+        cfg["args"] = args
+        if cfg.get("stepquant_plan"):
+            cfg["stepquant_plan"] = host_path(cfg["stepquant_plan"])
+        return cfg
+    S.stepquant_host_config = host_config
+    S.stepquant_store_config = lambda cfg: to_sycl(cfg, exe, real_ram, {}, intel[0]["vram_gb"], intel[0]["driver"])
+
+    def trace_command(cfg, args):
+        cfg.setdefault("env", {}).update(sycl_env)
+        cfg["env"]["STRATA_SYCL_NAME"] = f"strata-stepquant-trace-{os.getpid()}"
+        # The trace uses the port's normal expert streaming / Alchemist RAM path.
+        port = to_sycl({**cfg, "args": list(args)}, exe, real_ram, {}, intel[0]["vram_gb"], intel[0]["driver"])
+        cfg["env"].update(port.get("env", {}))
+        args = port["args"]
+        drop(args, "--prefill", True)
+        args += ["--prefill", "64"]
+        for f in ("--tokens-file", "--stepquant-trace"):
+            if f in args:
+                args[args.index(f) + 1] = sycl_path(args[args.index(f) + 1])
+        return [str(SYCL_WRAPPER), *args]
+    S.stepquant_trace_command = trace_command
     S.hipblaslt_table = lambda *a, **k: None
     S.ram_gb = lambda: fake_ram                         # the experts are in VRAM: setup's RAM rule does not apply
 

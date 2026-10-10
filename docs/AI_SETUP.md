@@ -103,6 +103,7 @@ The flags (all of them: `START-HERE.bat --help`):
 | `--host H --api-key K` | listen beyond this PC; **only together with a key** |
 | `--no-start` | install only, do not start the server |
 | `--setup` | install another model or change settings of an installed one |
+| `--stepquant on` | experimental GDN state compression; compiles support and calibrates on the installed model; options and measured quality: [STEPQUANT.md](STEPQUANT.md) |
 | `--check` | only check the PC |
 
 `--no-start` is recommended for agents: the server runs in the foreground until its window is closed, which would

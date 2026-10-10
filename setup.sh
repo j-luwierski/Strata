@@ -1,6 +1,8 @@
 #!/bin/sh
 # Strata for Linux: the first run installs everything and starts the model; later runs just start it.
 # Needs only an NVIDIA driver (or, for an AMD Radeon card, the kernel's amdgpu driver: see docs/AMD_HIP.md).
+# Optional packed GDN state: ./setup.sh --setup (STEPQuant question), or --stepquant on --yes.
+# Calibration choices: --stepquant-bits 4|6 --stepquant-pivots N --stepquant-horizon N --stepquant-corpus FILE.
 # Python (with venv) is installed through apt/dnf if it is missing (asks for sudo).
 # NixOS (or STRATA_UV=1) with uv installed: uv makes the project venv; every other Linux uses the standard venv.
 cd "$(dirname "$0")" || exit 1
