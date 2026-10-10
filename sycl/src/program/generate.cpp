@@ -619,6 +619,9 @@ struct Options {
     /// Plan v0.3 P6: a draft enters the verify window only while every draft before it (and itself) has at least
     /// this probability under the draft layer; 0 = always --spec-1 drafts.
     double spec_min_p = 0.0;
+#ifdef STRATA_ENABLE_DLOOP
+    strata::spec::DLoopConfig dloop;
+#endif
     /// Stop when the model emits an end-of-turn token (<|endoftext|> 248044, <|im_end|> 248046, or --eos-ids).
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
@@ -789,6 +792,12 @@ void usage() {
                  "  --vram-elastic       --serve (#533, opt-in, NVIDIA): the expert cache in segments (--vram-segment-mib,\n"
                  "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
                  "                       give VRAM back to other programs between requests and take it back later\n"
+#ifdef STRATA_ENABLE_DLOOP
+                 "  --dloop              experimental NAVER DLoop with stock --mtp weights (serial decoding)\n"
+                 "  --dloop-block-size N drafts per complete block (default 3)\n"
+                 "  --dloop-max-loops N  maximum blocks per verification (default 2; product <= 7)\n"
+                 "  --dloop-gate G       continue if latest block sum(log(q)) >= G (default -0.5)\n"
+#endif
                  "  --batch N / --slots N  --serve (opt-in): up to N requests decode together in batch slots (2..8\n"
                  "                       normally; --batch-mtp waves more through eight-row windows),\n"
                  "                       each slot with its own session (VRAM like the main one); docs/BATCHING.md\n"
@@ -1797,6 +1806,12 @@ int main(int argc, char **argv) try {
         else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
         else if (a == "--adapt-decay") o.adapt_decay = (float) std::atof(next("--adapt-decay"));
         else if (a == "--adapt-async") o.adapt_async = std::atoi(next("--adapt-async")) != 0 ? 1 : 0;
+#ifdef STRATA_ENABLE_DLOOP
+        else if (a == "--dloop") o.dloop.enabled = true;
+        else if (a == "--dloop-block-size") o.dloop.block_size = std::atoi(next("--dloop-block-size"));
+        else if (a == "--dloop-max-loops") o.dloop.max_loops = std::atoi(next("--dloop-max-loops"));
+        else if (a == "--dloop-gate") o.dloop.gate = std::atof(next("--dloop-gate"));
+#endif
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--stop-eos") o.stop_eos = true;
         else if (a == "--spec-split") o.spec_split = true;
@@ -2212,6 +2227,21 @@ int main(int argc, char **argv) try {
         return 2;
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
+#ifdef STRATA_ENABLE_DLOOP
+    if (o.dloop.enabled) {
+        const std::string error = o.dloop.error();
+        if (!error.empty() || o.mtp.empty() || o.native_preset.empty() || o.batch > 0 ||
+            o.pipeline_windows >= 2 || o.lookup_chain > 0 || !o.spec_oracle.empty()) {
+            std::fprintf(stderr, "strata generate: DLoop: %s\n", error.empty() ?
+                         "needs --native and --mtp; batch, pipeline-windows >= 2, lookup-chain and spec-oracle are unsupported" : error.c_str());
+            return 2;
+        }
+        o.spec = o.dloop.drafts() + 1;
+        o.mtp_max_t = o.spec;
+        std::fprintf(stderr, "strata generate: experimental DLoop: block=%d gate=%g loops=%d, stock MTP weights\n",
+                     o.dloop.block_size, o.dloop.gate, o.dloop.max_loops);
+    }
+#endif
     // Prompt lookup (the suffix drafter, on by default): the MTP keeps its --spec windows and a lookup window may be
     // up to 2 tokens longer; the draft policy (strata/spec/draft_policy.hpp) takes one only where it pays. Code
     // edits +6-11%, ordinary text unchanged (bench/results/2026-09-27-spec). --suffix-draft 0 turns it off.
@@ -3879,6 +3909,9 @@ int main(int argc, char **argv) try {
     // Secure MTP's CUDA0 allocations before the large host arena is registered with both CUDA contexts.
     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
     strata::core::MtpDrafter mtp;
+#ifdef STRATA_ENABLE_DLOOP
+    mtp.set_dloop(o.dloop);
+#endif
     // the draft layer's geometry (the canonical model's MTP head), `static` because MtpDrafter keeps a reference; the batch
     // slots' draft-KV copies use this one too
     static const strata::core::ModelGeometry draft_geometry{};
@@ -10992,6 +11025,10 @@ int main(int argc, char **argv) try {
             }
             while (!pl_ran && !cancelled && produced_n < max_new) {
                 int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
+#ifdef STRATA_ENABLE_DLOOP
+                if (o.dloop.enabled) T = mtp.dloop_drafts() + 1;
+                else
+#endif
                 if (use_mtp && req_spec_min_p > 0.0) {
                     T = 1;
                     while (T < S_mtp && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
@@ -12194,6 +12231,10 @@ int main(int argc, char **argv) try {
         while ((int64_t) produced.size() < max_new) {
             const Clock::time_point t0 = Clock::now();
             int T = S_mtp;
+#ifdef STRATA_ENABLE_DLOOP
+            if (o.dloop.enabled) T = mtp.dloop_drafts() + 1;
+            else
+#endif
             if (use_mtp && o.spec_min_p > 0.0) {
                 T = 1;
                 while (T < S_mtp && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;

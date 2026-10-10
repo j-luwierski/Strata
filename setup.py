@@ -58,6 +58,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from tools import dloop_setup as DLOOP
+
 ROOT = Path(__file__).resolve().parent
 WIN = os.name == "nt"
 # #214: every Hugging Face file comes from a fixed commit of its repository (the `sha` of
@@ -2469,7 +2471,7 @@ def hipblaslt_table(arch, lib_dirs, ver=None):
     return None
 
 
-def build_engine_hip(gpu, llama, vision="none") -> Path:
+def build_engine_hip(gpu, llama, vision="none", dloop=False) -> Path:
     """Compile the HIP engine for this AMD GPU into engine/ (again only when its source changed: a `git pull`).
     gpu["archs"]: every architecture it needs code for (the cards of a layer split), else gpu["arch"].  vision "cpu"
     (#304): the image encoder too, for the CPU (there is no HIP encoder build yet)."""
@@ -2477,12 +2479,13 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+    dloop = dloop or bool(meta.get("dloop"))
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
     archs = sorted(set(gpu.get("archs") or [gpu["arch"]]))
     has_archs = set(archs) <= set(meta.get("archs", []))
     floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
     engine_ok = meta.get("backend") == "hip" and (eng / EXE).exists() and meta.get("src") == src and has_archs and \
-        (meta.get("isa_floor") or "") == floor
+        (meta.get("isa_floor") or "") == floor and (not dloop or meta.get("dloop"))
     vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc)
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -2505,7 +2508,7 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
         else f"  Compiling the Strata engine for your AMD GPU{'s' if len(archs) > 1 else ''} ({', '.join(archs)}; "
              "10-20 minutes, once) ...")
     cmake_build(ROOT, ROOT / "build-hip", "strata",
-                ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF",
+                ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_BUILD_TESTS=OFF", f"-DSTRATA_ENABLE_DLOOP={'ON' if dloop else 'OFF'}",
                  "-DSTRATA_PREFILL_MMQ=ON", "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
                  f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
                  "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
@@ -2513,7 +2516,7 @@ def build_engine_hip(gpu, llama, vision="none") -> Path:
                  f"-DSTRATA_GGML_DIR={llama}", *isa_floor_defs(floor, ROOT / "build-hip", meta)], None, "")
     shutil.copy2(ROOT / "build-hip" / EXE, eng / EXE)
     meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs, "vision": "none",
-            "lib_dirs": dirs, "src": src, **({"isa_floor": floor} if floor else {})}
+            "lib_dirs": dirs, "src": src, **({"dloop": True} if dloop else {}), **({"isa_floor": floor} if floor else {})}
     if vision != "none":
         return build_vision_cpu(eng, stamp, meta, llama, vsrc)
     stamp.write_text(json.dumps(meta, indent=1))
@@ -3180,7 +3183,7 @@ def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
     return vision
 
 
-def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
+def build_engine(gpu, vision, yes, llama, toolkit=None, dloop=False) -> Path:
     """Compile the engine (and, for images, the encoder) for this GPU; the results go to engine/.  A compiled
     engine whose source files changed since (a `git pull`) is compiled again: only the changed files, a few minutes.
     toolkit 12 (default: 12 for a card older than CUDA 13 supports): the experimental CUDA 12 engine, in
@@ -3192,6 +3195,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
     meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+    dloop = dloop or bool(meta.get("dloop"))
     want_vision = vision != "none"
     local = meta.get("source") == "local"
     src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
@@ -3202,7 +3206,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     new_arch = local and not set(archs) <= built
     floor = cpu_floor(cpu_info()[1])                     # "" on an AVX2 CPU: the normal engine
     engine_ok = local and (eng / EXE).exists() and meta.get("src") == src and not new_arch and \
-        (meta.get("isa_floor") or "") == floor
+        (meta.get("isa_floor") or "") == floor and (not dloop or meta.get("dloop"))
     vision_ok = not want_vision or ((eng / VEXE).exists() and (not local or meta.get("vision_src") == vsrc))
     if engine_ok and vision_ok:
         ok("engine already built for this PC")
@@ -3218,7 +3222,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
             "  The engine's source changed: compiling it again (only what changed, a few minutes) ..."
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, bdir, "strata",
-                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
+                    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", f"-DSTRATA_ENABLE_DLOOP={'ON' if dloop else 'OFF'}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), f"-DSTRATA_GGML_DIR={llama}",
                      *engine_defs(archs, toolkit),
                      *isa_floor_defs(floor, bdir, meta)],
@@ -3239,7 +3243,7 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
     stamp.write_text(json.dumps({"source": "local", "version": source_version(), "archs": archs,
                                  "vision": vision, **({"toolkit": 12} if t12 else {}),
                                  "cuda_dirs": dirs, "src": src, "vision_src": vsrc if want_vision else None,
-                                 **({"isa_floor": floor} if floor else {})}, indent=1))
+                                 **({"dloop": True} if dloop else {}), **({"isa_floor": floor} if floor else {})}, indent=1))
     ok(f"engine compiled: {eng / EXE}")
     return eng
 
@@ -3649,7 +3653,7 @@ def write_config(path: Path, cfg: dict):
 
 # #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
 # "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
-SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
+SETUP_KEYS = frozenset({"dloop", "exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP"})   # the "env" entries setup writes
 SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
@@ -4669,7 +4673,16 @@ def main() -> int:
                          "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use), "
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
+    DLOOP.arguments(ap)
     a = ap.parse_args()
+    if DLOOP.requested(a):
+        try:
+            DLOOP.choose(a, ask, say) if a.dloop == "off" else DLOOP.validate({
+                "block_size": a.dloop_block_size if a.dloop_block_size is not None else 3,
+                "max_loops": a.dloop_max_loops if a.dloop_max_loops is not None else min(2, 7 // max(1, a.dloop_block_size or 3)),
+                "gate": a.dloop_gate if a.dloop_gate is not None else -0.5})
+        except ValueError as e:
+            ap.error(str(e))
     if a.source:
         os.environ["STRATA_SOURCE"] = a.source
     if a.inspect:                                      # headers only: nothing is installed
@@ -4700,6 +4713,34 @@ def main() -> int:
 
     # ---- 0. already installed: just start it
     have = installed_configs()
+    if have and DLOOP.requested(a) and not (a.setup or a.model or a.family or a.check):
+        pick = have[0]
+        if len(have) > 1:
+            for i, path in enumerate(have, 1):
+                say(f"  {i}) {path.stem}")
+            pick = have[int(ask("Configure DLoop for which model?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
+        cfg = json.loads(pick.read_text(encoding="utf-8-sig"))
+        try:
+            choice = DLOOP.choose(a, ask, say, cfg.get("dloop"))
+            DLOOP.apply(cfg, choice)
+        except ValueError as e:
+            fail(str(e))
+        if choice["enabled"] and not DLOOP.capability(cfg["exe"], subprocess.run):
+            if cfg.get("backend") == "sycl" or WIN and cfg.get("backend") == "hip":
+                fail("this engine was built without DLoop", "build it with -DSTRATA_ENABLE_DLOOP=ON first")
+            cards = amd_gpus() if cfg.get("backend") == "hip" else gpus()
+            if not cards:
+                fail("no GPU found to build the DLoop engine")
+            card = next((g for g in cards if g["index"] == (a.gpu if a.gpu is not None else cfg.get("gpu", 0))), cards[0])
+            llama = get_llama_cpp()
+            eng = build_engine_hip(card, llama, "none", dloop=True) if cfg.get("backend") == "hip" else \
+                build_engine(card, "none", a.yes, llama, toolkit=12 if a.cuda == "12" else None, dloop=True)
+            cfg["exe"] = str(eng / EXE)
+            if not DLOOP.capability(cfg["exe"], subprocess.run):
+                fail("built engine does not advertise DLoop support")
+        write_setup_config(pick, cfg)
+        ok("DLoop " + ("enabled" if choice["enabled"] else "disabled"))
+        return 0 if a.no_start or a.update else start(pick, a.port, a.gpu, yes=a.yes)
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
     explicit = a.setup or a.model or a.family or a.check or a.no_start
@@ -5210,6 +5251,13 @@ def main() -> int:
     pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
+    try:
+        dloop_choice = DLOOP.choose(a, ask, say, json.loads(adopted.read_text(encoding="utf-8-sig")).get("dloop") if adopted else None)
+    except ValueError as e:
+        fail(str(e))
+    if dloop_choice["enabled"] and a.parallel and a.parallel > 1:
+        fail("DLoop currently supports one request at a time (--parallel 1)")
+
     # ---- 4. the engine
     step(4, "the Strata engine")
     llama = get_llama_cpp()
@@ -5223,7 +5271,7 @@ def main() -> int:
         gpu = hip_card(eng, gpu, amd)
         a.gpu = gpu["index"] if gpu["count"] > 1 else a.gpu
     else:
-        eng = None if a.build or hip else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
+        eng = None if a.build or hip or dloop_choice["enabled"] else get_prebuilt(a.prebuilt, gpu, vision, **({"toolkit": 12} if cuda_tk == 12
                                                                                     else {}))
     if eng is not None and not hip and json.loads((eng / "BUILD.json").read_text(encoding="utf-8")).get("source") != "local":
         pip_cuda_libs(cuda_tk)
@@ -5233,7 +5281,12 @@ def main() -> int:
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text(encoding="utf-8")), gpu, vision)
     if eng is None:
-        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
+        eng = build_engine_hip(gpu, llama, vision, dloop=True) if hip and dloop_choice["enabled"] else \
+              build_engine_hip(gpu, llama, vision) if hip else \
+              build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk, dloop=True) if dloop_choice["enabled"] else \
+              build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
+    if dloop_choice["enabled"] and not DLOOP.capability(eng / EXE, subprocess.run):
+        fail("this engine was built without DLoop", "build it with -DSTRATA_ENABLE_DLOOP=ON first")
     meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
     if hip and WIN:                                    # the ready-made engine's rocm/bin, first on the engine's PATH
         lib_dirs = [str(d) for d in hip_lib_dirs(eng)]
@@ -5517,6 +5570,10 @@ def main() -> int:
             say("  " + line)
     for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN):
         say("  " + line)
+    try:
+        DLOOP.apply(cfg, dloop_choice)
+    except ValueError as e:
+        fail(str(e))
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it

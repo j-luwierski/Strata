@@ -18,6 +18,7 @@ if(CMAKE_MATCH_1)
 else()
   set(STRATA_SYCL_VERSION 0.1.40.2)
 endif()
+option(STRATA_ENABLE_DLOOP "Experimental NAVER DLoop inference with stock MTP weights" OFF)
 project(strata_sycl VERSION ${STRATA_SYCL_VERSION} LANGUAGES C CXX)
 set(STRATA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(CMAKE_CXX_STANDARD 20)
@@ -205,6 +206,9 @@ strata_resolve(_engine src/core/layer.cpp src/core/session.cpp src/core/expert_s
                        src/core/conversation_file.cpp
                        src/core/peer_experts.cpp src/core/remote_expert_opt_stub.cpp)         # 0.1.36+: --peer-device (a stub in the port: no second GPU tier yet)
 add_library(strata_engine STATIC ${_engine} ${CMAKE_CURRENT_SOURCE_DIR}/src/core/gguf_expert_source.cpp)
+if(STRATA_ENABLE_DLOOP)
+  target_compile_definitions(strata_engine PUBLIC STRATA_ENABLE_DLOOP=1)
+endif()
 target_include_directories(strata_engine PRIVATE ${STRATA_ROOT}/src/core)   # conversation_checked.hpp (#include "...")
 target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu)
 

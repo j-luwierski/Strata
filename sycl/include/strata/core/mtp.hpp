@@ -21,6 +21,9 @@
 
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#ifdef STRATA_ENABLE_DLOOP
+#include "strata/spec/dloop.hpp"
+#endif
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
@@ -71,6 +74,10 @@ public:
     /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
     static bool top2_env();
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
+#ifdef STRATA_ENABLE_DLOOP
+    void set_dloop(const strata::spec::DLoopConfig& config) { dloop_ = config; }
+    int dloop_drafts() const { return dloop_last_; }
+#endif
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
@@ -165,6 +172,10 @@ public:
     }
 
 private:
+#ifdef STRATA_ENABLE_DLOOP
+    strata::spec::DLoopConfig dloop_;
+    int dloop_last_ = 0;
+#endif
     bool record_forward(int T, int step_row0, dpct::queue_ptr cs,
                         std::string &err);
     /// The layer's front for T rows at step rows [row0, +T): the embedding, the fc projections, the attention

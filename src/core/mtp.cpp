@@ -1291,6 +1291,41 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     };
 
     int n = 0;
+#ifdef STRATA_ENABLE_DLOOP
+    if (dloop_.enabled && max_steps > 0) {
+        const std::string config_error = dloop_.error();
+        if (!config_error.empty() || max_steps < dloop_.drafts()) {
+            err = config_error.empty() ? "DLoop draft buffer too small" : config_error;
+            return false;
+        }
+        prefetch_ple(tokens[a]);
+        {
+            for (int loop = 0; loop < dloop_.max_loops; ++loop) {
+                const int begin = n;
+                for (int j = begin; j < begin + dloop_.block_size; ++j) {
+                    if (cudaGraphLaunch(j == 0 ? (cp ? round_exec_c_[T] : round_exec_[T]) :
+                                       (cp ? step_exec_c_[j] : step_exec_[j]), cs_) != cudaSuccess) {
+                        err = "DLoop draft: graph launch failed";
+                        return false;
+                    }
+                }
+                if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+                    err = "DLoop draft: stream synchronization failed";
+                    return false;
+                }
+                float block_prob[7];
+                for (int j = begin; j < begin + dloop_.block_size; ++j) {
+                    drafts[j] = h_out_[j];
+                    block_prob[j - begin] = h_prob_[j];
+                    if (probs) probs[j] = h_prob_[j];
+                    prefetch_ple(drafts[j]);
+                    ++n;
+                }
+                if (!dloop_.extend(block_prob, dloop_.block_size)) break;
+            }
+        }
+    } else
+#endif
     if (min_p <= 0.0f && max_steps > 0) {
         if (cudaGraphLaunch(cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
@@ -1366,6 +1401,9 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         }
     }
     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
+#ifdef STRATA_ENABLE_DLOOP
+    dloop_last_ = n;
+#endif
     if (n_drafts) *n_drafts = n;
     ms_draft += ms_since(t0);
     ++rounds;
