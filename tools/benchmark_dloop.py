@@ -25,8 +25,15 @@ PROMPTS = {
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for flag in ("baseline", "engine", "pack", "native", "mtp", "out"):
+    for flag in ("baseline", "engine", "pack", "native", "out"):
         p.add_argument("--" + flag, type=Path, required=True)
+    drafter = p.add_mutually_exclusive_group(required=True)
+    drafter.add_argument("--mtp", type=Path)
+    drafter.add_argument("--dflash", type=Path, help="needs the separate DFlash integration patch")
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--seed", type=int, default=123)
+    p.add_argument("--reference-spec", type=int, default=4)
+    p.add_argument("--reference-min-p", type=float, default=0.5)
     p.add_argument("--profile", type=Path, default=Path("data/expert-profile.bin"))
     p.add_argument("--cache", type=int, default=4000)
     p.add_argument("--tokens", type=int, default=128)
@@ -39,14 +46,17 @@ def main():
     a.out.mkdir(parents=True, exist_ok=True)
     tok = Tokenizer.from_gguf(a.native)
     report = {"date": time.strftime("%Y-%m-%d"), "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
-              "platform": platform.uname()._asdict(), "runs": []}
+              "platform": platform.uname()._asdict(), "env": {"STRATA_PREFILL_CPU_SHARE": "0"}, "runs": []}
     for command, key in [(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"], "gpu"),
                          (["lscpu"], "cpu")]:
         report[key] = subprocess.run(command, capture_output=True, text=True).stdout
-    common = ["--pack", str(a.pack.resolve()), "--native", str(a.native.resolve()), "--mtp", str(a.mtp.resolve()),
+    common = ["--pack", str(a.pack.resolve()), "--native", str(a.native.resolve()),
               "--expert-profile", str(a.profile.resolve()), "--expert-cache", str(a.cache), "--max-context", "4096",
               "--max-new", str(a.tokens), "--prefill", "64", "--ple-io", "ram", "--pcie-frac", "0",
-              "--adapt-every", "0", "--pool-workers", "12", "--suffix-draft", "0", "--spec", "4", "--spec-min-p", "0.5"]
+              "--adapt-every", "0", "--pool-workers", "12", "--suffix-draft", "0", "--spec", str(a.reference_spec), "--spec-min-p", str(a.reference_min_p)]
+    common += ["--mtp", str(a.mtp.resolve())] if a.mtp else ["--dflash", str(a.dflash.resolve()), "--dflash-block", str(a.block_size)]
+    if a.temperature > 0:
+        common += ["--temperature", str(a.temperature), "--seed", str(a.seed)]
     reference = {}
     for repeat in range(a.repeats):
         for name in a.prompt or PROMPTS:

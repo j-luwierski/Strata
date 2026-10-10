@@ -1,0 +1,426 @@
+{
+  "choice": {
+    "enabled": false
+  },
+  "report": {
+    "date": "2026-10-10",
+    "runs": {
+      "off": [
+        {
+          "tok_s": 49.62009613893627,
+          "same_tokens": true,
+          "per_prompt_tok_s": [
+            61.03375929811177,
+            47.60251896662865,
+            49.62009613893627
+          ],
+          "matches": [
+            true,
+            true,
+            true
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 49.48198546466677,
+          "same_tokens": true,
+          "per_prompt_tok_s": [
+            59.44640535017648,
+            47.39570476425574,
+            49.48198546466677
+          ],
+          "matches": [
+            true,
+            true,
+            true
+          ],
+          "repeat": 1
+        }
+      ],
+      "b3-n2-g-0.5": [
+        {
+          "tok_s": 42.73884783189387,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            58.23829167677748,
+            36.2688427972345,
+            42.73884783189387
+          ],
+          "matches": [
+            true,
+            false,
+            false
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 42.784561903913,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            58.22416302765648,
+            35.94832428384198,
+            42.784561903913
+          ],
+          "matches": [
+            true,
+            false,
+            false
+          ],
+          "repeat": 1
+        }
+      ],
+      "b3-n2-g-0.25": [
+        {
+          "tok_s": 43.4526773186077,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            57.48158792886654,
+            41.37931034482759,
+            43.4526773186077
+          ],
+          "matches": [
+            true,
+            false,
+            false
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 43.03196019543682,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            56.17648779916905,
+            40.45682498208942,
+            43.03196019543682
+          ],
+          "matches": [
+            true,
+            false,
+            false
+          ],
+          "repeat": 1
+        }
+      ],
+      "b3-n2-g-1": [
+        {
+          "tok_s": 39.05614320585842,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            55.38248528902734,
+            34.13211974685345,
+            39.05614320585842
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 38.57125637831974,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            54.04492484377639,
+            33.52540597171294,
+            38.57125637831974
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 1
+        }
+      ],
+      "b2-n3-g-0.5": [
+        {
+          "tok_s": 42.18852999340804,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            59.310515260101326,
+            41.26902244003095,
+            42.18852999340804
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 40.35478582538148,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            51.563003544956494,
+            38.3340654074991,
+            40.35478582538148
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 1
+        }
+      ],
+      "b2-n3-g-1": [
+        {
+          "tok_s": 38.08768101567149,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            54.98911673731241,
+            34.52740612861459,
+            38.08768101567149
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 0
+        },
+        {
+          "tok_s": 33.37505214851898,
+          "same_tokens": false,
+          "per_prompt_tok_s": [
+            54.79139318532047,
+            33.37505214851898,
+            25.77250395983785
+          ],
+          "matches": [
+            false,
+            false,
+            true
+          ],
+          "repeat": 1
+        }
+      ]
+    },
+    "rates": {
+      "off": 49.55104080180152
+    },
+    "winner": "off",
+    "min_gain": 0.03,
+    "repeats": 2,
+    "max_new": 96,
+    "engine_info": {
+      "off": {
+        "version": "0.1.41",
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 4,
+        "mtp_max": 0,
+        "lookup": 0,
+        "vram_free_mib": 888,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.50",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      },
+      "b3-n2-g-0.5": {
+        "version": "0.1.41",
+        "dloop": 1,
+        "dloop_block": 3,
+        "dloop_gate": "-0.5",
+        "dloop_loops": 2,
+        "dloop_cache_budget": 3999,
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 7,
+        "mtp_max": 7,
+        "lookup": 0,
+        "vram_free_mib": 866,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.00",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      },
+      "b3-n2-g-0.25": {
+        "version": "0.1.41",
+        "dloop": 1,
+        "dloop_block": 3,
+        "dloop_gate": "-0.25",
+        "dloop_loops": 2,
+        "dloop_cache_budget": 3999,
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 7,
+        "mtp_max": 7,
+        "lookup": 0,
+        "vram_free_mib": 866,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.00",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      },
+      "b3-n2-g-1": {
+        "version": "0.1.41",
+        "dloop": 1,
+        "dloop_block": 3,
+        "dloop_gate": -1,
+        "dloop_loops": 2,
+        "dloop_cache_budget": 3999,
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 7,
+        "mtp_max": 7,
+        "lookup": 0,
+        "vram_free_mib": 866,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.00",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      },
+      "b2-n3-g-0.5": {
+        "version": "0.1.41",
+        "dloop": 1,
+        "dloop_block": 2,
+        "dloop_gate": "-0.5",
+        "dloop_loops": 3,
+        "dloop_cache_budget": 3999,
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 7,
+        "mtp_max": 7,
+        "lookup": 0,
+        "vram_free_mib": 866,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.00",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      },
+      "b2-n3-g-1": {
+        "version": "0.1.41",
+        "dloop": 1,
+        "dloop_block": 2,
+        "dloop_gate": -1,
+        "dloop_loops": 3,
+        "dloop_cache_budget": 3999,
+        "context": 4096,
+        "kv": "fp16",
+        "kv_resident": 0,
+        "expert_slots": 5357,
+        "expert_cache_mib": 8886,
+        "expert_slots_primary": 5357,
+        "expert_cache_primary_mib": 8886,
+        "spec": 7,
+        "mtp_max": 7,
+        "lookup": 0,
+        "vram_free_mib": 870,
+        "cvec": 0,
+        "arena_mib": 40925,
+        "pool_workers": 12,
+        "pcie_frac": "0.00",
+        "spec_min_p": "0.00",
+        "conversation_cache_mib": 0,
+        "conversation_cache_slots": 4,
+        "conversation_cache_min_free_mib": 2560,
+        "tail_role_token": -1,
+        "vram_elastic": 0,
+        "engine": "0.1.41"
+      }
+    },
+    "cpu": "",
+    "platform": "Linux-6.12.107+deb13-amd64-x86_64-with-glibc2.41",
+    "base_args": [
+      "--pack",
+      "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata-data/packs/iq3_xxs",
+      "--native",
+      "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata-data/models/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+      "--mtp",
+      "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata-data/mtp/rt",
+      "--expert-profile",
+      "/home/jakub/workspace/deepseek-harness/harnes_workspace/Strata/data/expert-profile.bin",
+      "--expert-cache",
+      "4000",
+      "--max-context",
+      "4096",
+      "--prefill",
+      "64",
+      "--ple-io",
+      "ram",
+      "--pcie-frac",
+      "0",
+      "--pool-workers",
+      "12",
+      "--suffix-draft",
+      "0",
+      "--spec",
+      "4",
+      "--spec-min-p",
+      "0.5",
+      "--prompt-cache",
+      "0",
+      "--conversation-cache-mib",
+      "0",
+      "--adapt-every",
+      "0"
+    ],
+    "env": {
+      "STRATA_PREFILL_CPU_SHARE": "0"
+    },
+    "scope": "small greedy-token parity and speed check; stock MTP/DFlash, no loop-aware training"
+  }
+}

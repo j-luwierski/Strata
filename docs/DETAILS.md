@@ -462,6 +462,10 @@ START-HERE.bat --calibrate                      tune the engine for this PC (abo
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
 
+**Experimental DLoop:** `./setup.sh --dloop on` selects complete MTP drafting blocks before one verification;
+`--dloop-calibrate` checks token parity and speed and can choose off. It defaults to off. Parameters, build
+requirements, measured limitations and the separate DFlash integration delta are in [DLOOP.md](DLOOP.md).
+
 **Tuning for your PC (`--calibrate`, engine 0.1.19).** Four engine settings depend on the PC more than on the model:
 - the share of the experts missing from VRAM that are copied to the GPU instead of computed by the CPU
   (`--pcie-frac`: a fast PCIe link and a slower CPU want more, a laptop's narrower link less);

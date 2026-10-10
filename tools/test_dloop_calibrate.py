@@ -1,4 +1,8 @@
 import copy
+import contextlib
+import io
+import json
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -8,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools import dloop_calibrate as C, dloop_setup as D
 from tools.test_setup_dloop import BASE, ON
+import setup as S
 
 
 class FakeEngine:
@@ -59,6 +64,44 @@ class Calibration(unittest.TestCase):
         self.assertEqual(result['report']['winner'], 'off')
         self.assertEqual(len(closed), 3)
         self.assertEqual(C.CAL.arg_value(result['report']['base_args'], '--expert-cache'), '100')
+
+
+class SavedCalibration(unittest.TestCase):
+    def config(self, root):
+        cfg = D.apply(copy.deepcopy(BASE), ON)
+        path = Path(root) / 'strata-test.json'
+        path.write_text(json.dumps(cfg))
+        return path, cfg
+
+    def test_failed_measurement_leaves_config_byte_identical(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, _ = self.config(root)
+            before = path.read_bytes()
+            with mock.patch.object(C, 'run', side_effect=RuntimeError('GPU failure')), contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(S.calibrate_dloop_config(path))
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_off_winner_restores_flags_and_saves_report(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, _ = self.config(root)
+            result = {'choice': {'enabled': False}, 'report': {'winner': 'off', 'base_args': []}}
+            with mock.patch.object(C, 'run', return_value=result), contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(S.calibrate_dloop_config(path))
+            cfg = json.loads(path.read_text())
+            self.assertNotIn('dloop', cfg)
+            self.assertEqual(D.value(cfg['args'], '--spec-min-p'), '0.5')
+            self.assertEqual(cfg['sampling'], BASE['sampling'])
+            self.assertEqual(cfg['dloop_calibration'], result['report'])
+
+    def test_on_winner_saves_measured_cache_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            path, _ = self.config(root)
+            result = {'choice': ON, 'report': {'winner': C.key(ON), 'base_args': ['--expert-cache', '90']}}
+            with mock.patch.object(C, 'run', return_value=result), contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(S.calibrate_dloop_config(path))
+            cfg = json.loads(path.read_text())
+            self.assertEqual(D.value(cfg['args'], '--expert-cache'), '90')
+            self.assertEqual(cfg['dloop']['previous']['--spec'], '4')
 
 
 if __name__ == '__main__': unittest.main()

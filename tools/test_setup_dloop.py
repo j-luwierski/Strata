@@ -108,7 +108,7 @@ int main() {
     invalid[0] = std::numeric_limits<float>::quiet_NaN(); assert(!c.extend(invalid, 3));
     invalid[0] = 1.1; assert(!c.extend(invalid, 3));
     c.block_size = 2; c.max_loops = 3; c.gate = -0.5;
-    float blocks[] = {.99f, .99f, .8f, .8f, .9f, .9f};
+    float blocks[] = {.9f, .9f, .8f, .8f, .9f, .9f};
     // The second block passes on its own; a cumulative gate would wrongly stop before block three.
     assert(c.extend(blocks + 2, 2)); assert(c.extend(blocks + 4, 2));
     c.max_loops = 4; assert(!c.error().empty());

@@ -4756,8 +4756,9 @@ def main() -> int:
                 fail("no GPU found to build the DLoop engine")
             card = next((g for g in cards if g["index"] == (a.gpu if a.gpu is not None else cfg.get("gpu", 0))), cards[0])
             llama = get_llama_cpp()
+            toolkit = 12 if a.cuda == "12" or (a.cuda is None and Path(cfg["exe"]).parent.name == "engine-cuda12") else None
             eng = build_engine_hip(card, llama, "none", dloop=True) if cfg.get("backend") == "hip" else \
-                build_engine(card, "none", a.yes, llama, toolkit=12 if a.cuda == "12" else None, dloop=True)
+                build_engine(card, "none", a.yes, llama, toolkit=toolkit, dloop=True)
             cfg["exe"] = str(eng / EXE)
             if not DLOOP.capability(cfg["exe"], subprocess.run):
                 fail("built engine does not advertise DLoop support")
@@ -4766,7 +4767,9 @@ def main() -> int:
         if choice["enabled"] and (a.dloop_calibrate or not a.yes and ask(
                 "Calibrate DLoop now? (later: ./setup.sh --dloop-calibrate --yes --no-start)", ["y", "n"], "n", a.yes) == "y"):
             calibrate_dloop_config(pick)
-        return 0 if a.no_start or a.update else start(pick, a.port, a.gpu, yes=a.yes)
+        return 0 if a.no_start or a.update else start(pick, a.port, a.gpu, yes=a.yes, layer_split=a.layer_split,
+                     keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
+                           "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
     explicit = a.setup or a.model or a.family or a.check or a.no_start
@@ -5272,11 +5275,6 @@ def main() -> int:
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
              "use --models-dir on a bigger drive")
 
-    # ---- 3. python packages
-    step(3, "Python packages")
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
-
     try:
         previous_dloop_path = ROOT / f"strata-{tag}.json"
         previous_dloop_path = previous_dloop_path if previous_dloop_path.exists() else adopted
@@ -5286,6 +5284,11 @@ def main() -> int:
         fail(str(e))
     if dloop_choice["enabled"] and a.parallel and a.parallel > 1:
         fail("DLoop currently supports one request at a time (--parallel 1)")
+
+    # ---- 3. python packages
+    step(3, "Python packages")
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
+                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
     # ---- 4. the engine
     step(4, "the Strata engine")

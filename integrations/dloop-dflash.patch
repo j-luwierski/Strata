@@ -1,0 +1,323 @@
+diff --git a/include/strata/core/dflash.hpp b/include/strata/core/dflash.hpp
+index ff286570..e3a124e2 100644
+--- a/include/strata/core/dflash.hpp
++++ b/include/strata/core/dflash.hpp
+@@ -15,6 +15,9 @@
+ // Semantics and the DeepSpec anchor layout: docs/DFLASH.md.
+ #pragma once
+ 
++#ifdef STRATA_ENABLE_DLOOP
++#include "strata/spec/dloop.hpp"
++#endif
+ #include "strata/artifact/gguf_reader.hpp"
+ #include "strata/core/session.hpp"
+ #include "strata/core/vmm.hpp"
+@@ -170,6 +173,12 @@ public:
+     /// pos+1+j.  Synchronizes the drafter's stream before returning.
+     bool propose(int32_t x, int64_t pos, int block, int32_t* out, std::string& err, float* probabilities = nullptr);
+ 
++#ifdef STRATA_ENABLE_DLOOP
++    // Later blocks use the preceding block's final normalized draft features
++    // directly as context. Committed target taps overwrite these after verify.
++    bool propose_loop(int32_t x, int64_t pos, const strata::spec::DLoopConfig& config,
++                      int32_t* out, std::string& err, float* probabilities, int& n_drafts);
++#endif
+     cudaStream_t stream() const { return cs_; }
+     /// The drafter's per-layer K/V states (read-only: STRATA_STATE_HASH hashes them like MTP's).
+     const std::vector<QsaState>& kv_states() const { return st_; }
+@@ -182,6 +191,9 @@ public:
+     int64_t mask_token() const { return mask_; }
+ 
+ private:
++#ifdef STRATA_ENABLE_DLOOP
++    bool append_context_rows(int64_t pos0, int rows, std::string& err);
++#endif
+     /// ctx = hidden_norm(fc(tapin_)) for `rows` rows already staged in `tapin_` ([rows][F] bf16),
+     /// then each draft layer's context K/V appended at [pos0, pos0+rows).
+     bool fusion_rows(int64_t pos0, int rows, std::string& err);
+diff --git a/src/core/dflash_runtime.cpp b/src/core/dflash_runtime.cpp
+index 375c2a68..de75dc72 100644
+--- a/src/core/dflash_runtime.cpp
++++ b/src/core/dflash_runtime.cpp
+@@ -1,6 +1,9 @@
+ // src/core/dflash_runtime.cpp - the DFlashDrafter's device half: weights, K/V pools, the fusion
+ // and the block forward (the artifact loader lives in dflash.cpp).  Semantics: docs/DFLASH.md.
+ #include "strata/core/dflash.hpp"
++#ifdef STRATA_ENABLE_DLOOP
++#include "strata/core/on_device.hpp"
++#endif
+ #include "strata/core/native_head.hpp"
+ #include "strata/core/layer.hpp"
+ #include "strata/kernels/bf16_gemv.hpp"
+@@ -741,6 +744,28 @@ bool DFlashDrafter::fusion_rows(int64_t pos0, int rows, std::string& err) {
+         std::fprintf(stderr, "dflash dbg: fusion ctx norm pos0=%lld rows=%d rms=%.4f\n", (long long) pos0, rows,
+                      std::sqrt(s2 / probe.size()));
+     }
++#ifdef STRATA_ENABLE_DLOOP
++    return append_context_rows(pos0, rows, err);
++}
++
++bool DFlashDrafter::append_context_rows(int64_t pos0, int rows, std::string& err) {
++    using namespace strata::kernels;
++    const DFlashGeometry& dg = artifact_.geom();
++    const int64_t N = dg.hidden, KVW = dg.n_head_kv * dg.head_dim;
++    if (pos0 < 0 || rows < 1 || pos0 + rows > cap_ || pos0 + rows > scratch_cap_ ||
++        (st_[0].kv_elastic >= 0 && pos0 + rows > qsa_kv_elastic_cells())) {
++        err = "DLoop DFlash context exceeds mapped capacity";
++        return false;
++    }
++    auto wp = [&](const char* name) -> const uint16_t* {
++        for (auto& [n, p] : wt_) if (n == name) return p;
++        return nullptr;
++    };
++    auto wf = [&](const char* name) -> const float* {
++        for (auto& [n, p] : wf_) if (n == name) return p;
++        return nullptr;
++    };
++#endif
+     {
+         DFlashSection section("fusion.to_bf16");
+         f32_to_bf16_bulk(ctx_, xn16_, (int64_t) rows * N, cs_);
+@@ -823,6 +848,39 @@ bool DFlashDrafter::fusion_rows(int64_t pos0, int rows, std::string& err) {
+     return true;
+ }
+ 
++#ifdef STRATA_ENABLE_DLOOP
++bool DFlashDrafter::propose_loop(int32_t x, int64_t pos, const strata::spec::DLoopConfig& config,
++                               int32_t* out, std::string& err, float* probabilities, int& n_drafts) {
++    n_drafts = 0;
++    const std::string invalid = config.error();
++    if (!invalid.empty() || config.block_size > max_rows_ || !out || !probabilities ||
++        pos < 0 || pos + config.drafts() > cap_ || pos + config.drafts() > scratch_cap_ ||
++        (st_[0].kv_elastic >= 0 && pos + config.drafts() > strata::core::qsa_kv_elastic_cells())) {
++        err = invalid.empty() ? "DLoop DFlash block cannot fit the artifact or mapped capacity" : invalid;
++        return false;
++    }
++    const strata::core::OnDevice on_device(device_);
++    const int k = config.block_size;
++    for (int loop = 0; loop < config.max_loops; ++loop) {
++        const int begin = n_drafts;
++        if (!propose(x, pos + begin, k, out + begin, err, probabilities + begin)) return false;
++        n_drafts += k;
++        if (loop + 1 == config.max_loops || !config.extend(probabilities + begin, k)) break;
++        // xn_ is the final norm output returned by DFlashDraftModel.forward,
++        // i.e. Eq. 3's draft-side features. Do not replicate target taps or
++        // pass these through fc: they already have the context's hidden width.
++        if (cudaMemcpyAsync(ctx_, xn_, (size_t) k * artifact_.geom().hidden * sizeof(float),
++                            cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
++            !append_context_rows(pos + begin, k, err)) {
++            if (err.empty()) err = "DLoop DFlash feature staging failed";
++            return false;
++        }
++        x = out[n_drafts - 1];
++    }
++    return true;
++}
++#endif
++
+ bool DFlashDrafter::propose(int32_t x, int64_t pos, int block, int32_t* out, std::string& err, float* probabilities) {
+     using namespace strata::kernels;
+     const DFlashGeometry& dg = artifact_.geom();
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 146c9d47..6cc2f1b2 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -755,7 +755,7 @@ void usage() {
+                  "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
+                  "                       give VRAM back to other programs between requests and take it back later\n"
+ #ifdef STRATA_ENABLE_DLOOP
+-                 "  --dloop              experimental NAVER DLoop with stock --mtp weights (serial decoding)\n"
++                 "  --dloop              experimental NAVER DLoop with stock --mtp or --dflash weights (serial decoding)\n"
+                  "  --dloop-block-size N drafts per complete block (default 3)\n"
+                  "  --dloop-max-loops N  maximum blocks per verification (default 2; product <= 7)\n"
+                  "  --dloop-gate G       continue if latest block sum(log(q)) >= G (default -0.5)\n"
+@@ -2290,15 +2290,16 @@ int main(int argc, char** argv) {
+ #ifdef STRATA_ENABLE_DLOOP
+     if (o.dloop.enabled) {
+         const std::string error = o.dloop.error();
+-        if (!error.empty() || o.mtp.empty() || o.native_preset.empty() || o.batch > 0 ||
++        if (!error.empty() || (o.mtp.empty() && o.dflash.empty()) || o.native_preset.empty() || o.batch > 0 ||
+             o.pipeline_windows >= 2 || o.lookup_chain > 0 || !o.spec_oracle.empty()) {
+             std::fprintf(stderr, "strata generate: DLoop: %s\n", error.empty() ?
+-                         "needs --native and --mtp; batch, pipeline-windows >= 2, lookup-chain and spec-oracle are unsupported" : error.c_str());
++                         "needs --native and --mtp or --dflash; batch, pipeline-windows >= 2, lookup-chain and spec-oracle are unsupported" : error.c_str());
+             return 2;
+         }
+         o.spec = o.dloop.drafts() + 1;
+         o.mtp_max_t = o.spec;
+-        std::fprintf(stderr, "strata generate: experimental DLoop: block=%d gate=%g loops=%d, stock MTP weights\n",
++        if (!o.dflash.empty()) o.dflash_block = o.dloop.block_size;
++        std::fprintf(stderr, "strata generate: experimental DLoop: block=%d gate=%g loops=%d, stock MTP/DFlash weights\n",
+                      o.dloop.block_size, o.dloop.gate, o.dloop.max_loops);
+     }
+ #endif
+@@ -4089,7 +4090,7 @@ int main(int argc, char** argv) {
+     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
+     strata::core::MtpDrafter mtp;
+ #ifdef STRATA_ENABLE_DLOOP
+-    mtp.set_dloop(o.dloop);
++    if (!o.mtp.empty()) mtp.set_dloop(o.dloop);
+ #endif
+     // the draft layer's geometry (the canonical model's MTP head), `static` because MtpDrafter keeps a reference; the batch
+     // slots' draft-KV copies use this one too
+@@ -9251,6 +9252,12 @@ int main(int argc, char** argv) {
+                 std::printf("ERR bad request: calibration parameter\n");
+                 continue;
+             }
++#ifdef STRATA_ENABLE_DLOOP
++            if (o.dloop.enabled && req_dflash_block_set && req_dflash_k != o.dloop.block_size) {
++                std::printf("ERR dflash_block is fixed by --dloop-block-size while DLoop is enabled\n");
++                continue;
++            }
++#endif
+             if (bad_dflash_block) {
+                 std::printf("ERR bad request: dflash_block\n");
+                 continue;
+@@ -11079,12 +11086,29 @@ int main(int argc, char** argv) {
+                     // Finish near the context limit with target-only windows rather than
+                     // proposing a block which the next verification window cannot fit.
+                     dflash_ready = drafted && df_pending_k > 0 &&
+-                                   p + a + 1 + df_pending_k + 1 <= o.max_context;
++                                   p + a + 1 +
++#ifdef STRATA_ENABLE_DLOOP
++                                   (o.dloop.enabled ? o.dloop.drafts() : df_pending_k) +
++#else
++                                   df_pending_k +
++#endif
++                                   1 <= o.max_context;
+                     const bool proposed = dflash_ready;
+-                    if (dflash_ready)
++                    if (dflash_ready) {
++#ifdef STRATA_ENABLE_DLOOP
++                        if (o.dloop.enabled)
++                            drafted = dflash.propose_loop(outv[(size_t) a], p + a + 1, o.dloop,
++                                                          drafts.data(), err, dprob.data(), df_pending_k);
++                        else
++#endif
+                         drafted = dflash.propose(outv[(size_t) a], p + a + 1, df_pending_k, drafts.data(), err,
+                                                  req_spec_min_p > 0 ? dprob.data() : nullptr);
+-                    if (dflash_ready && drafted && req_spec_min_p > 0) {
++                    }
++                    if (dflash_ready && drafted && req_spec_min_p > 0
++#ifdef STRATA_ENABLE_DLOOP
++                        && !o.dloop.enabled
++#endif
++                    ) {
+                         const float min_p = (float) req_spec_min_p;
+                         int prefix = 0;
+                         while (prefix < df_pending_k && dprob[(size_t) prefix] >= min_p) ++prefix;
+@@ -12101,6 +12125,9 @@ int main(int argc, char** argv) {
+         // becomes the anchor; its tap row seeds the anchor's context cell (docs/DFLASH.md).
+         bool first_window = native_pack || use_dflash;
+         double ms_dflash = 0;
++#ifdef STRATA_ENABLE_DLOOP
++        int dloop_pending = 0;
++#endif
+         int64_t dflash_proposes = 0;
+         if (use_mtp && !first_window &&
+             !mtp.draft_first(o.spec, ss.R, x, p - 1, drafts.data(), err, dprob.data(), (float) o.spec_min_p)) {
+@@ -12142,7 +12169,7 @@ int main(int argc, char** argv) {
+             const Clock::time_point t0 = Clock::now();
+             int T = use_dflash ? dflash_k + 1 : S_mtp;
+ #ifdef STRATA_ENABLE_DLOOP
+-            if (o.dloop.enabled && use_mtp) T = mtp.dloop_drafts() + 1;
++            if (o.dloop.enabled) T = use_mtp ? mtp.dloop_drafts() + 1 : dloop_pending + 1;
+             else
+ #endif
+             if ((use_mtp || use_dflash) && o.spec_min_p > 0.0) {
+@@ -12354,8 +12381,15 @@ int main(int argc, char** argv) {
+                     const Clock::time_point td = Clock::now();
+                     const bool ok = dflash.add_context_f32(ver.taps(), ver.n_taps(), ver.tap_stride(),
+                                                            p - (a + 1), a + 1, err, false) &&
+-                                    (drafted = dflash.propose(x, p, dflash_k, drafts.data(), err,
+-                                                                o.spec_min_p > 0 ? dprob.data() : nullptr));
++                                    (drafted = [&]() {
++#ifdef STRATA_ENABLE_DLOOP
++                                        if (o.dloop.enabled)
++                                            return dflash.propose_loop(x, p, o.dloop, drafts.data(), err,
++                                                                       dprob.data(), dloop_pending);
++#endif
++                                        return dflash.propose(x, p, dflash_k, drafts.data(), err,
++                                                              o.spec_min_p > 0 ? dprob.data() : nullptr);
++                                    }());
+                     if (ok && std::getenv("STRATA_DF_DBG") != nullptr) {
+                         std::fprintf(stderr, "df dbg: anchor=%d at %lld proposals:", x, (long long) p);
+                         for (int i = 0; i < dflash_k; ++i) std::fprintf(stderr, " %d", drafts[(size_t) i]);
+diff --git a/tools/dloop_setup.py b/tools/dloop_setup.py
+index 067d70f7..6e299a01 100644
+--- a/tools/dloop_setup.py
++++ b/tools/dloop_setup.py
+@@ -3,11 +3,11 @@ import math
+ import subprocess
+ 
+ FLAGS = ("--dloop", "--dloop-block-size", "--dloop-gate", "--dloop-max-loops")
+-MANAGED = ("--spec", "--spec-min-p", "--mtp-max-t")
++MANAGED = ("--spec", "--spec-min-p", "--mtp-max-t", "--dflash-block")
+ 
+ 
+ def arguments(parser):
+-    parser.add_argument("--dloop", choices=("on", "off"), help="experimental NAVER DLoop with stock MTP weights")
++    parser.add_argument("--dloop", choices=("on", "off"), help="experimental NAVER DLoop with stock MTP/DFlash weights")
+     parser.add_argument("--dloop-calibrate", action="store_true", help="measure DLoop settings and keep a faster token-matching choice")
+     parser.add_argument("--dloop-block-size", type=int, help="drafts per block (default 3)")
+     parser.add_argument("--dloop-gate", type=float, help="latest block log probability threshold (default -0.5)")
+@@ -34,7 +34,7 @@ def choose(a, ask, say, previous=None):
+         enabled = "on"
+     if enabled is None:
+         say("  Experimental NAVER DLoop: draft complete blocks before one target verification.")
+-        say("  Stock MTP weights, without the paper's loop-aware training. Speed must be measured on your PC.")
++        say("  Stock MTP/DFlash weights, without the paper's loop-aware training. Speed must be measured on your PC.")
+         enabled = "on" if ask("Use DLoop?", ["y", "n"], "y" if previous.get("enabled") else "n", a.yes) == "y" else "off"
+     if enabled == "off":
+         if any(getattr(a, n) is not None for n in ("dloop_block_size", "dloop_gate", "dloop_max_loops")):
+@@ -76,8 +76,8 @@ def apply(cfg, choice):
+     old = cfg.get("dloop") or {}
+     if choice["enabled"]:
+         validate(choice)
+-        if "--mtp" not in args or "--native" not in args:
+-            raise ValueError("DLoop needs a native model with --mtp; this installation uses a different drafter")
++        if not any(f in args for f in ("--mtp", "--dflash")) or "--native" not in args:
++            raise ValueError("DLoop needs a native model with --mtp or --dflash; this installation uses a different drafter")
+         if cfg.get("parallel", 1) > 1 or any(f in args for f in ("--batch", "--slots", "--lookup-chain", "--spec-oracle")) or \
+                 int(value(args, "--pipeline-windows") or 0) >= 2:
+             raise ValueError("DLoop currently supports serial decoding; turn off parallel/batch, lookup-chain and pipeline-windows >= 2")
+@@ -88,6 +88,8 @@ def apply(cfg, choice):
+         args += ["--dloop", "--dloop-block-size", str(choice["block_size"]), "--dloop-gate", str(choice["gate"]),
+                  "--dloop-max-loops", str(choice["max_loops"]), "--spec", str(choice["block_size"] * choice["max_loops"] + 1),
+                  "--spec-min-p", "0", "--mtp-max-t", str(choice["block_size"] * choice["max_loops"] + 1)]
++        if "--dflash" in args:
++            args += ["--dflash-block", str(choice["block_size"])]
+         cfg["dloop"] = {**choice, "previous": previous}
+     elif old.get("enabled") or "--dloop" in args:
+         args = drop(args, FLAGS + MANAGED)
+diff --git a/tools/test_setup_dloop.py b/tools/test_setup_dloop.py
+index 9d42b0bf..82dc0747 100644
+--- a/tools/test_setup_dloop.py
++++ b/tools/test_setup_dloop.py
+@@ -68,7 +68,7 @@ class Setup(unittest.TestCase):
+                            '--spec', '4', '--spec-min-p', '0.5']})
+ 
+     def test_incompatible_installs_unchanged(self):
+-        variants = [{**BASE, 'parallel': 2}, {**BASE, 'args': ['--native', 'x', '--dflash', 'y']},
++        variants = [{**BASE, 'parallel': 2}, {**BASE, 'args': ['--native', 'x', '--other-drafter', 'y']},
+                     {**BASE, 'args': BASE['args'] + ['--pipeline-windows', '2']},
+                     {**BASE, 'args': BASE['args'] + ['--batch', '2']},
+                     {**BASE, 'args': BASE['args'] + ['--lookup-chain', '2']}]
+@@ -78,6 +78,17 @@ class Setup(unittest.TestCase):
+                 D.apply(c, ON)
+             self.assertEqual(c, variant)
+ 
++    def test_dflash_block_is_selected_and_restored(self):
++        c = {'args': ['--native', 'model', '--dflash', 'draft.gguf', '--dflash-block', '7',
++                      '--spec', '8', '--spec-min-p', '0.5'], 'parallel': 1}
++        D.apply(c, ON)
++        self.assertEqual(D.value(c['args'], '--dflash-block'), '3')
++        self.assertEqual(D.value(c['args'], '--spec'), '7')
++        D.apply(c, {'enabled': False})
++        self.assertEqual(D.value(c['args'], '--dflash-block'), '7')
++        self.assertEqual(D.value(c['args'], '--spec'), '8')
++        self.assertNotIn('--dloop', c['args'])
++
+     def test_disabled_metadata_is_not_carried_over(self):
+         c = copy.deepcopy(BASE)
+         old = D.apply(copy.deepcopy(BASE), ON)
