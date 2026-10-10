@@ -1,0 +1,40 @@
+{
+  "hardware": "RTX 4070 Ti SUPER 16,376 MiB; Ryzen 9 5900X; 125 GiB RAM; CUDA 13.4; Linux",
+  "executable_sha256": "eee5159ad33ba6206dc3155f21c1b439df62937a40a5decd296e48e9e4f6d653",
+  "rows": [
+    {
+      "bits": 6,
+      "plan_sha256": "7d6684a328ceb0564c9880c726ce8195281e2f3603b49c9e6f376a7ad61decb9",
+      "fp32_recurrence_bytes": 113246208,
+      "payload_bytes": 22626304,
+      "previous_persistent_bytes": 32578560,
+      "compact_persistent_bytes": 22635520,
+      "temporary_bytes": 904960,
+      "device_metadata_bytes": 912384,
+      "additional_saved_bytes": 9943040,
+      "compact_with_temporary_and_metadata_bytes": 24452864,
+      "logprobs_identical_to_previous": true,
+      "logprobs_sha256": {
+        "fp32": "a77f4bfc445c637c0a98573c23061ec322e0401588856fef54e969abcac24b54",
+        "stepquant": "e402abe4b6d99d4c77412a88b5e903dc2a6ca0efc2f727bef4812b0bc6da54b1"
+      }
+    },
+    {
+      "bits": 4,
+      "plan_sha256": "51c98483d569b5de09243ad68bdc10c7ab20dd1bd409d253d500e74077eb82d8",
+      "fp32_recurrence_bytes": 113246208,
+      "payload_bytes": 16107520,
+      "previous_persistent_bytes": 29297664,
+      "compact_persistent_bytes": 16116736,
+      "temporary_bytes": 813824,
+      "device_metadata_bytes": 912384,
+      "additional_saved_bytes": 13180928,
+      "compact_with_temporary_and_metadata_bytes": 17842944,
+      "logprobs_identical_to_previous": true,
+      "logprobs_sha256": {
+        "fp32": "a77f4bfc445c637c0a98573c23061ec322e0401588856fef54e969abcac24b54",
+        "stepquant": "9cbc35f565a66cc222f492ed70fde0a80b6a1818338baf48663aaa2e7bbeb8b3"
+      }
+    }
+  ]
+}

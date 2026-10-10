@@ -1,0 +1,13 @@
+src/core/layer.cpp: default source byte-identical to origin/main
+src/core/verify.cpp: default source byte-identical to origin/main
+src/prefill/prefill.cpp: default source byte-identical to origin/main
+src/program/generate.cpp: default source byte-identical to origin/main
+src/core/session.cpp: default source byte-identical to origin/main
+src/core/conversation_state.cpp: default source byte-identical to origin/main
+include/strata/core/layer.hpp: default source byte-identical to origin/main
+sycl/src/core/layer.cpp: default source byte-identical to origin/main
+sycl/src/core/verify.cpp: default source byte-identical to origin/main
+sycl/src/prefill/prefill.cpp: default source byte-identical to origin/main
+sycl/src/program/generate.cpp: default source byte-identical to origin/main
+sycl/src/core/session.cpp: default source byte-identical to origin/main
+sycl/src/core/conversation_state.cpp: default source byte-identical to origin/main

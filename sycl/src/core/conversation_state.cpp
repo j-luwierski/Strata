@@ -138,7 +138,7 @@ bool conversation_state_sizes(const ModelGeometry& g, ConversationStateSizes& z,
         return fail(error, "running-state byte count overflow");
 #ifdef STRATA_ENABLE_STEPQUANT
     if (strata::kernels::stepquant_enabled())
-        z.gdn = (size_t) g.n_gdn_layers()*(strata::kernels::stepquant_recurrence_bytes() + convolution*sizeof(float));
+        z.gdn = strata::kernels::stepquant_session_bytes(convolution*sizeof(float), (int) g.n_gdn_layers());
 #endif
     z.block_pos = sizeof(int32_t);
     size_t total = 0;
@@ -157,6 +157,14 @@ bool conversation_session_sizes(const ModelGeometry& g, const SessionState& ss, 
         ss.qsa_ord0 > n_qsa || ss.qsa_alloc > n_qsa - ss.qsa_ord0)
         return fail(error, "invalid session layer carve");
     // z.gdn is n_gdn whole rows; the session holds gdn_alloc of them (all of them for the default full range)
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled()) {
+        if (ss.gdn_ord0 < 0 || ss.gdn_ord0 > n_gdn || ss.gdn_alloc > n_gdn-ss.gdn_ord0)
+            return fail(error, "invalid STEPQuant session layer carve");
+        z.gdn = strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) ss.gdn_alloc, (int) ss.gdn_ord0);
+    }
+    else
+#endif
     z.gdn = n_gdn > 0 ? z.gdn / (size_t) n_gdn * (size_t) ss.gdn_alloc : 0;
     return true;
 }

@@ -3413,8 +3413,7 @@ int main(int argc, char **argv) try {
     const int64_t kPipeSnapMib = o.pipeline_windows >= 2 ? 96 : 0;   // ~3 MiB per GDN layer, twice, ~15 layers
     auto gdn_snapshot_bytes = [&](const strata::core::SessionState& s0) -> size_t {
 #ifdef STRATA_ENABLE_STEPQUANT
-        if (strata::kernels::stepquant_enabled()) return (size_t) s0.gdn_alloc *
-            (strata::kernels::stepquant_recurrence_bytes() + (size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4);
+        if (strata::kernels::stepquant_enabled()) return strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) s0.gdn_alloc, (int) s0.gdn_ord0);
 #endif
         return (size_t) s0.gdn_alloc * ((size_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                         (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1)) * sizeof(float);
@@ -11303,6 +11302,13 @@ int main(int argc, char **argv) try {
                     std::string s;
                     char b[8];
                     for (int64_t i = 0; i < ss.gdn_alloc; ++i) {
+#ifdef STRATA_ENABLE_STEPQUANT
+                        if (strata::kernels::stepquant_enabled()) {
+                            const size_t offset = strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) i, (int) ss.gdn_ord0);
+                            const size_t bytes = strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, 1, (int) (ss.gdn_ord0+i));
+                            std::snprintf(b, sizeof(b), "%04llx ", (unsigned long long) (hash_dev((const uint8_t*) ss.gdn_state+offset, bytes, 1469598103934665603ull) & 0xffff));
+                        } else
+#endif
                         std::snprintf(b, sizeof(b), "%04llx ", (unsigned long long) (hash_dev((const uint8_t*) ss.gdn_state + i * per, per, 1469598103934665603ull) & 0xffff));
                         s += b;
                     }

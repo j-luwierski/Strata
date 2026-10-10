@@ -52,7 +52,11 @@ void stepquant_verify(int layer, void* slot, float* scratch, void* temporary,
                       const float* h, int channels, const float* gate, const float* beta,
                       const float* z, const float* gamma, float eps, float* y,
                       int key_heads, int heads, int tokens, const int32_t* keep, void* stream);
-size_t stepquant_recurrence_bytes(); // common 256-aligned slot, includes plan header
+size_t stepquant_recurrence_bytes(); // largest slot, for shared temporary storage only
+size_t stepquant_recurrence_bytes(int layer); // this layer's 256-aligned slot + header
+// Sum a contiguous GDN ordinal range. Also gives the offset to a layer when
+// count is its ordinal minus the session's first ordinal.
+size_t stepquant_session_bytes(size_t convolution_bytes, int count, int ordinal=0);
 bool stepquant_bind_session(void* arena, size_t convolution_bytes, int count, int ordinal);
 void stepquant_zero_session(void* arena, size_t convolution_bytes, void* stream);
 bool stepquant_zero_layer(void* slot, void* stream);

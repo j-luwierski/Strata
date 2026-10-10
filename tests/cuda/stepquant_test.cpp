@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <vector>
 
+namespace strata::core { void gdn_point_at(const ModelGeometry&, int64_t, SessionState&); }
 using namespace strata::kernels;
 namespace {
 void ck(cudaError_t e) { if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); }
@@ -100,7 +101,7 @@ void session_storage(cudaStream_t stream, bool canonical) {
         f << "STRATA_STEPQUANT 1 128 " << H << " " << layers << "\n";
         for(int l=0;l<g.n_layers;++l) if (!is_qsa_layer(g,l)) {
             f << l << "\n";
-            for(size_t h=0;h<H;++h) f << std::vector<int>{2,4,6,8,16}[h%5] << " ";
+            for(size_t h=0;h<H;++h) f << (l == 0 ? std::vector<int>{2,4,6,8,16}[h%5] : 2) << " ";
             f << "\n";
             for(size_t i=0;i<H*128;++i) f << "1 ";
             f << "\n";
@@ -120,7 +121,21 @@ void session_storage(cudaStream_t stream, bool canonical) {
     ConversationStateSizes sizes; std::string error;
     require(conversation_session_sizes(g,ss,sizes,error),error);
     const size_t conv=(size_t)g.ssm_conv_channels*(g.ssm_d_conv-1)*4;
-    require(sizes.gdn==layers*(stepquant_recurrence_bytes()+conv),"snapshot byte estimate ignored packed stride");
+    require(sizes.gdn==stepquant_session_bytes(conv,(int) layers),"snapshot byte estimate ignored layer sizes");
+    size_t expected_bytes=0;
+    for(int l=0;l<g.n_layers;++l) if (!is_qsa_layer(g,l)) {
+        // Independent expected sizes include the FP16 scales for integer heads.
+        const size_t head_bytes[]={5376,8704,12800,16896,32768};
+        size_t payload=0;
+        for(size_t h=0;h<H;++h) payload+=head_bytes[l==0 ? h%5 : 0];
+        require(stepquant_recurrence_bytes(l)==(payload+16+255)/256*256,"wrong per-layer packed size");
+        expected_bytes+=stepquant_recurrence_bytes(l)+conv;
+    }
+    require(sizes.gdn==expected_bytes,"compact arena differs from sum of layers");
+    require(sizes.gdn<layers*(stepquant_recurrence_bytes()+conv),"heterogeneous layers still padded to largest slot");
+    std::vector<uint8_t> old_layout(layers*(stepquant_recurrence_bytes()+conv));
+    require(!stepquant_validate_session(old_layout.data(),old_layout.size(),conv,(int)layers,0,error),"old padded checkpoint accepted");
+    require(error=="STEPQuant: incompatible packed session geometry","old padded checkpoint rejection did not check length");
     Buffer dense(elements);
     stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     compare(dense.download(elements),std::vector<float>(elements,0.f),0.f);
@@ -133,7 +148,7 @@ void session_storage(cudaStream_t stream, bool canonical) {
     require(conversation_checkpoint_validate(checkpoint,ss,g,error),error);
     auto corrupted=checkpoint; corrupted.gdn[0]^=1;
     require(!conversation_checkpoint_validate(corrupted,ss,g,error),"foreign plan header accepted");
-    auto b=ss.gdn; b.state=ss.gdn_state; b.conv_state=ss.gdn_state+stepquant_recurrence_bytes()/4;
+    auto b=ss.gdn; b.state=ss.gdn_state; b.conv_state=ss.gdn_state+stepquant_recurrence_bytes(0)/4;
     gdn_buffers_zero_state(b,g,stream); ck(cudaStreamSynchronize(stream));
     stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     compare(dense.download(x.size()),std::vector<float>(x.size(),0.f),0.f);
@@ -147,6 +162,12 @@ void session_storage(cudaStream_t stream, bool canonical) {
         require(session_init(g,16,10,second.p,other)>0,"second session rejected");
         require(session_init(g,16,10,ranged.p,range,2,4)>0,"range session rejected");
         require(range.gdn_ord0==1 && range.gdn_alloc==1,"wrong split ordinals");
+        ConversationStateSizes range_sizes;
+        require(conversation_session_sizes(g,range,range_sizes,error),error);
+        require(range_sizes.gdn==stepquant_recurrence_bytes(2)+conv,"split snapshot uses wrong layer size");
+        gdn_point_at(g,2,other);
+        require(other.gdn.state==other.gdn_state+stepquant_session_bytes(conv,1)/4,"second layer offset mismatch");
+        require(other.gdn.conv_state==other.gdn.state+stepquant_recurrence_bytes(2)/4,"second layer convolution offset mismatch");
         session_zero(other,g,nullptr,stream); session_zero(range,g,nullptr,stream);
         stepquant_read(2,range.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
         compare(dense.download(elements),std::vector<float>(elements,0.f),0.f);
@@ -190,6 +211,23 @@ void session_storage(cudaStream_t stream, bool canonical) {
         ConversationCheckpoint split_checkpoint; split_checkpoint.ids={2};
         require(conversation_checkpoint_save(split_checkpoint,range,g,error),error);
         require(conversation_checkpoint_validate(split_checkpoint,range,g,error),error);
+        require(split_checkpoint.gdn.size()==range_sizes.gdn,"split checkpoint padded to first layer size");
+        require(conversation_checkpoint_restore(split_checkpoint,range,g,error),error);
+        // Clear the smaller second layer without corrupting the preceding layer.
+        stepquant_read(0,other.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        const auto neighbour=dense.download(elements);
+        auto small=other.gdn;
+        dense.upload(x); stepquant_writeback(2,small.state,dense.p,stream);
+        gdn_buffers_zero_state(small,g,stream); ck(cudaStreamSynchronize(stream));
+        stepquant_read(0,other.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        compare(dense.download(elements),neighbour,0.f);
+        stepquant_read(2,small.state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        compare(dense.download(elements),std::vector<float>(elements,0.f),0.f);
+        require(conversation_checkpoint_save(split_checkpoint,other,g,error),error);
+        require(conversation_checkpoint_validate(split_checkpoint,other,g,error),error);
+        bool rejected=false;
+        try { stepquant_session_bytes(conv,3,0); } catch(const std::invalid_argument&) { rejected=true; }
+        require(rejected,"out-of-range compact carve accepted");
         ck(cudaGraphExecDestroy(exec)); ck(cudaGraphDestroy(graph));
         session_release(other); delete[] other.qsa_states;
         session_release(range); delete[] range.qsa_states;
@@ -197,6 +235,31 @@ void session_storage(cudaStream_t stream, bool canonical) {
     }
     session_release(ss); delete[] ss.qsa_states;
     std::printf("packed session + checkpoint restore: dense=%zu packed=%zu saved=%zu bytes\n",dense_bytes,packed_bytes,dense_bytes-packed_bytes);
+}
+void calibrated_allocation(const char* path, cudaStream_t stream) {
+    using namespace strata::core;
+    ModelGeometry g;
+    const size_t dense=session_bytes(g,16,10);
+    stepquant_configure(path,(int)g.n_layers,(int)g.qsa_interval,(int)g.ssm_v_heads,128);
+    const size_t compact=session_bytes(g,16,10);
+    const size_t conv=(size_t)g.ssm_conv_channels*(g.ssm_d_conv-1)*4;
+    Buffer arena((compact+3)/4), state((size_t)g.ssm_v_heads*128*128);
+    SessionState ss;
+    require(session_init(g,16,10,arena.p,ss)>0,"calibrated session init failed");
+    session_zero(ss,g,nullptr,stream);
+    for(int l=0;l<g.n_layers;++l) if (!is_qsa_layer(g,l)) {
+        gdn_point_at(g,l,ss);
+        stepquant_read(l,ss.gdn.state,state.p,stream);
+        ck(cudaStreamSynchronize(stream));
+        compare(state.download((size_t)g.ssm_v_heads*128*128),std::vector<float>((size_t)g.ssm_v_heads*128*128,0.f),0.f);
+    }
+    ConversationCheckpoint checkpoint; checkpoint.ids={1}; std::string error;
+    require(conversation_checkpoint_save(checkpoint,ss,g,error),error);
+    require(conversation_checkpoint_restore(checkpoint,ss,g,error),error);
+    std::printf("calibrated allocation: dense_arena=%zu compact_arena=%zu saved=%zu persistent_recurrence=%zu temporary=%zu bytes\n",
+        dense,compact,dense-compact,stepquant_session_bytes(0,(int)g.n_gdn_layers()),stepquant_recurrence_bytes());
+    require(checkpoint.gdn.size()==stepquant_session_bytes(conv,(int)g.n_gdn_layers()),"calibrated checkpoint size mismatch");
+    session_release(ss); delete[] ss.qsa_states; stepquant_release();
 }
 void basic(cudaStream_t stream) {
     StepQuantPlan plan{{2,4,6,8,16},std::vector<float>(5*128,1.f)};
@@ -252,7 +315,8 @@ int main(int argc,char** argv) {
     try {
         ck(cudaStreamCreate(&stream)); basic(stream); session_storage(stream,false); session_storage(stream,true);
         if(argc==5 && std::string(argv[1])=="--reference" && std::string(argv[3])=="--trace") reference(argv[2],argv[4],stream);
-        else require(argc==1,"usage: stepquant_test [--reference fixture.bin --trace results.bin]");
+        else if(argc==3 && std::string(argv[1])=="--allocation-plan") calibrated_allocation(argv[2],stream);
+        else require(argc==1,"usage: stepquant_test [--reference fixture.bin --trace results.bin | --allocation-plan plan]");
         ck(cudaStreamDestroy(stream)); return 0;
     } catch(const std::exception& e) {
         std::fprintf(stderr,"STEPQuant test: %s\n",e.what()); cudaStreamDestroy(stream); return 1;

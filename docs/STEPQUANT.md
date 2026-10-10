@@ -29,8 +29,11 @@ There are two interfaces:
   therefore change outputs in this experimental mode.
 
 Session allocation, convolution offsets, checkpoint sizes and snapshot/read
-limits use the packed slot size. Slots use the largest layer payload in the
-plan, rounded to 256 bytes, so layers with a smaller payload have padding.
+limits use the packed slot size. Each layer uses its own payload plus a
+16-byte header, rounded to 256 bytes. Prefix offsets locate its slot in full
+and split sessions. Only the shared speculative temporary buffer uses the
+largest slot size. Old heterogeneous checkpoints with the padded layout are
+rejected by byte-count/header validation; existing calibration plans still work.
 Convolution, PLE and QSA states retain their existing formats and precision.
 Checkpoints and disk sessions preserve packed bytes. Each slot carries the
 plan fingerprint and payload size; restore rejects a different calibration
@@ -260,3 +263,11 @@ windows over both slots and reused a 64-token prompt checkpoint. The replies
 reached the test's short token limit during reasoning, so this is a scheduling
 and state-storage check, not answer-quality evidence. The temporary server was
 stopped after the test. All 273 Python server tests passed.
+
+## Per-layer storage allocation
+
+The calibrated @6/@4 plans now save an additional 9.482/12.570 MiB per full
+session by removing padding to the largest layer. The repeated full-model
+logprob files are byte-identical to the earlier results for both plans.
+See the [allocation and parity report](../bench/results/2026-10-10-stepquant-compact-state/README.md)
+for byte counts, hardware, test conditions and backend limitations.

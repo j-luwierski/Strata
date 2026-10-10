@@ -5,6 +5,7 @@ int runtime_heads = 0, runtime_interval = 0;
 struct Session { size_t conv; int count, ordinal, device; };
 std::map<void*, Session> sessions;
 size_t runtime_slot = 0;
+std::vector<size_t> layer_slots, slot_prefix;
 std::vector<std::array<uint64_t, 2>> headers;
 uint64_t plan_hash(const StepQuantPlan& plan, int layer) {
     uint64_t h = 1469598103934665603ull;
@@ -119,6 +120,13 @@ void stepquant_configure(const std::string& path, int layers, int interval, int 
     }
     std::string trailing;
     if (input >> trailing) throw std::invalid_argument("STEPQuant: trailing plan data");
+    std::vector<size_t> pending_slots(layers), pending_prefix{0};
+    for (int l = 0; l < layers; ++l) if (!pending[l].bits.empty()) {
+        pending_slots[l] = (pending_headers[l][1] + 16 + 255) / 256 * 256;
+        pending_prefix.push_back(pending_prefix.back() + pending_slots[l]);
+    }
+    layer_slots = std::move(pending_slots);
+    slot_prefix = std::move(pending_prefix);
     plans = std::move(pending);
     headers = std::move(pending_headers);
     runtime_slot = (slot + 255) / 256 * 256;
@@ -171,6 +179,20 @@ void stepquant_verify(int layer, void* slot, float* scratch, void* temporary,
     }
 }
 size_t stepquant_recurrence_bytes() { return runtime_slot; }
+size_t stepquant_recurrence_bytes(int layer) {
+    if (layer < 0 || size_t(layer) >= layer_slots.size() || !layer_slots[layer])
+        throw std::invalid_argument("STEPQuant: invalid recurrent layer");
+    return layer_slots[layer];
+}
+size_t stepquant_session_bytes(size_t conv, int count, int ordinal) {
+    if (count < 0 || ordinal < 0 || slot_prefix.empty() ||
+        size_t(ordinal) >= slot_prefix.size() || size_t(count) > slot_prefix.size()-1-size_t(ordinal))
+        throw std::invalid_argument("STEPQuant: invalid session range");
+    const size_t slots = slot_prefix[ordinal+count] - slot_prefix[ordinal];
+    if (count && conv > (SIZE_MAX-slots)/size_t(count))
+        throw std::overflow_error("STEPQuant: session byte count overflow");
+    return slots + size_t(count)*conv;
+}
 bool stepquant_bind_session(void* arena, size_t conv, int count, int ordinal) {
     if (plans.empty()) return true;
     const auto layers = gdn_layers();
@@ -190,7 +212,7 @@ void stepquant_zero_session(void* arena, size_t conv, void* stream) {
     if (it == sessions.end() || it->second.conv != conv) throw std::invalid_argument("STEPQuant: unregistered session");
     auto layers = gdn_layers();
     for (int i = 0; i < it->second.count; ++i)
-        check(cudaMemcpyAsync(static_cast<unsigned char*>(arena) + size_t(i)*(runtime_slot+conv),
+        check(cudaMemcpyAsync(static_cast<unsigned char*>(arena) + stepquant_session_bytes(conv, i, it->second.ordinal),
                               headers[layers[it->second.ordinal+i]].data(), 16, cudaMemcpyHostToDevice,
                               static_cast<cudaStream_t>(stream)));
 }
@@ -202,12 +224,14 @@ bool stepquant_zero_layer(void* slot, void* stream) {
     for (auto& entry : sessions) {
         if (entry.second.device != current_device) continue;
         const uintptr_t base = reinterpret_cast<uintptr_t>(entry.first);
-        const size_t stride = runtime_slot+entry.second.conv;
-        if (address < base || address-base >= size_t(entry.second.count)*stride || (address-base)%stride) continue;
-        const int layer = layers[entry.second.ordinal+(address-base)/stride];
-        check(cudaMemsetAsync(slot, 0, runtime_slot, static_cast<cudaStream_t>(stream)));
-        check(cudaMemcpyAsync(slot, headers[layer].data(), 16, cudaMemcpyHostToDevice, static_cast<cudaStream_t>(stream)));
-        return true;
+        if (address < base) continue;
+        for (int i = 0; i < entry.second.count; ++i) {
+            if (address-base != stepquant_session_bytes(entry.second.conv, i, entry.second.ordinal)) continue;
+            const int layer = layers[entry.second.ordinal+i];
+            check(cudaMemsetAsync(slot, 0, layer_slots[layer], static_cast<cudaStream_t>(stream)));
+            check(cudaMemcpyAsync(slot, headers[layer].data(), 16, cudaMemcpyHostToDevice, static_cast<cudaStream_t>(stream)));
+            return true;
+        }
     }
     return false;
 }
@@ -215,13 +239,12 @@ void stepquant_unbind_session(void* arena) { sessions.erase(arena); }
 bool stepquant_validate_session(const void* host, size_t bytes, size_t conv, int count, int ordinal, std::string& error) {
     if (plans.empty()) return true;
     const auto layers = gdn_layers();
-    const size_t stride = runtime_slot+conv;
-    if (count < 0 || ordinal < 0 || size_t(ordinal+count) > layers.size() || (!host && count) || bytes != size_t(count)*stride) {
+    if (count < 0 || ordinal < 0 || size_t(ordinal+count) > layers.size() || (!host && count) || bytes != stepquant_session_bytes(conv, count, ordinal)) {
         error = "STEPQuant: incompatible packed session geometry"; return false;
     }
     for (int i = 0; i < count; ++i) {
         std::array<uint64_t, 2> header;
-        std::memcpy(header.data(), static_cast<const unsigned char*>(host)+size_t(i)*stride, 16);
+        std::memcpy(header.data(), static_cast<const unsigned char*>(host)+stepquant_session_bytes(conv, i, ordinal), 16);
         if (header != headers[layers[ordinal+i]]) { error = "STEPQuant: checkpoint uses a different calibration plan"; return false; }
     }
     return true;
@@ -269,6 +292,7 @@ void stepquant_observe(int layer, const float* h, const float* gate, const float
 }
 void stepquant_release() {
     traces.clear(); trace_directory.clear();
+    layer_slots.clear(); slot_prefix.clear();
     devices.clear(); plans.clear(); headers.clear(); sessions.clear(); runtime_slot = 0; runtime_heads = 0; runtime_interval = 0;
 }
 } // namespace strata::kernels

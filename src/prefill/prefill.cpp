@@ -1999,14 +1999,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         ~KvDrain() { if (stream) cudaStreamSynchronize(stream); }
     } kv_drain{kv_prefetch ? m.kv_copy : nullptr};
     int64_t kv_prefetches = 0;
-#ifdef STRATA_ENABLE_STEPQUANT
-    const uint64_t gdn_floats = strata::kernels::stepquant_enabled()
-        ? strata::kernels::stepquant_recurrence_bytes()/4 + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1)
-        : (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
-#else
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
-#endif
     int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
     // layer split: a prompt of one chunk runs the stages one after the other, so the next stage's GPU idles while
     // this one reads; it streams and computes a share of this stage's experts then (set_stage_helper), in the
@@ -2539,12 +2533,23 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                           *wsa = need(v, "ssm_a", err);
                     if (!wqkv || !wg || !wo || !wa || !wb || !wc || !wnm || !wdt || !wsa) return false;
                     pt.mark(kPfGdn, cs);
+#ifdef STRATA_ENABLE_STEPQUANT
+                    float* state = strata::kernels::stepquant_enabled()
+                        ? ss.gdn_state + strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) (gdn_index-ss.gdn_ord0), (int) ss.gdn_ord0)/4
+                        : ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
+#else
                     float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
+#endif
+#ifdef STRATA_ENABLE_STEPQUANT
+                    float* conv = strata::kernels::stepquant_enabled()
+                        ? state + strata::kernels::stepquant_recurrence_bytes((int) l)/4
+                        : state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#else
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#endif
 #ifdef STRATA_ENABLE_STEPQUANT
                     void* packed_slot = state;
                     if (strata::kernels::stepquant_enabled()) {
-                        conv = state + strata::kernels::stepquant_recurrence_bytes()/4;
                         state = ss.gdn.stepquant_scratch;
                         try { strata::kernels::stepquant_read((int) l, packed_slot, state, m.cs); }
                         catch (const std::exception& e) { err = e.what(); return false; }
@@ -4073,6 +4078,14 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         std::string line;
         char h[8];
         for (int64_t i = 0; i < ss.gdn_alloc; ++i) {
+#ifdef STRATA_ENABLE_STEPQUANT
+            if (strata::kernels::stepquant_enabled()) {
+                const size_t offset = strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) i, (int) ss.gdn_ord0);
+                const size_t bytes = strata::kernels::stepquant_session_bytes((size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, 1, (int) (ss.gdn_ord0+i));
+                b.resize(bytes);
+                cudaMemcpy(b.data(), (const uint8_t*) ss.gdn_state+offset, bytes, cudaMemcpyDeviceToHost);
+            } else
+#endif
             cudaMemcpy(b.data(), ss.gdn_state + (size_t) i * gdn_floats, b.size(), cudaMemcpyDeviceToHost);
             uint64_t x = 1469598103934665603ull;
             for (uint8_t c : b) x = (x ^ c) * 1099511628211ull;

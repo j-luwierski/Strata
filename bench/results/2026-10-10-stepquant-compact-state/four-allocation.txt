@@ -1,0 +1,5 @@
+packed storage, zero states, pivots, GPU graphs, bounded traces and invalid plans: PASS
+independent sessions, split ranges, proposals, every accepted prefix and captured commits: PASS
+packed session + checkpoint restore: dense=6889472 packed=6414848 saved=474624 bytes
+packed session + checkpoint restore: dense=127387392 packed=24613888 saved=102773504 bytes
+calibrated allocation: dense_arena=127387392 compact_arena=31071744 saved=96315648 persistent_recurrence=16116736 temporary=813824 bytes
