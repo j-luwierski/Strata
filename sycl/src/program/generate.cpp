@@ -1810,7 +1810,15 @@ int main(int argc, char **argv) try {
         else if (a == "--dloop") o.dloop.enabled = true;
         else if (a == "--dloop-block-size") o.dloop.block_size = std::atoi(next("--dloop-block-size"));
         else if (a == "--dloop-max-loops") o.dloop.max_loops = std::atoi(next("--dloop-max-loops"));
-        else if (a == "--dloop-gate") o.dloop.gate = std::atof(next("--dloop-gate"));
+        else if (a == "--dloop-gate") {
+            const char* value = next("--dloop-gate");
+            char* end = nullptr;
+            o.dloop.gate = std::strtod(value, &end);
+            if (end == value || *end != '\0') {
+                std::fprintf(stderr, "strata generate: --dloop-gate requires a number\n");
+                return 2;
+            }
+        }
 #endif
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--stop-eos") o.stop_eos = true;
@@ -8339,6 +8347,14 @@ int main(int argc, char **argv) try {
                     slots_all += remote_experts[(size_t) r].resident();
                     mib_all += (int64_t) (remote_experts[(size_t) r].gib() * 1024.0);
                 }
+#ifdef STRATA_ENABLE_DLOOP
+            if (o.dloop.enabled) {
+                const auto& layout = strata::kernels::cpu::expert_layout();
+                const int64_t budget = layout.max_blob > 0 ? (mib_primary << 20) / layout.max_blob : 0;
+                std::printf("INFO dloop=1 dloop_block=%d dloop_gate=%g dloop_loops=%d dloop_cache_budget=%lld\n",
+                            o.dloop.block_size, o.dloop.gate, o.dloop.max_loops, (long long) budget);
+            }
+#endif
             std::printf("INFO context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
@@ -11065,6 +11081,12 @@ int main(int argc, char **argv) try {
                 T += chain_n;
                 const bool timed_round = !first_window;
                 const Clock::time_point round0 = Clock::now();
+#ifdef STRATA_ENABLE_DLOOP
+                if (o.dloop.enabled) {
+                    if (p >= o.max_context) break;
+                    T = std::min(T, (int) (o.max_context - p));
+                }
+#endif
                 if (p + T > o.max_context) break;
                 window[0] = x;
                 for (int i = 1; i < T_mtp; ++i) window[(size_t) i] = from_sfx ? sbuf[(size_t) i - 1] : drafts[(size_t) i - 1];
@@ -12268,6 +12290,12 @@ int main(int argc, char **argv) try {
             T += chain_n;
             const bool timed_round = !first_window;
             ++window_hist[(size_t) T];
+#ifdef STRATA_ENABLE_DLOOP
+            if (o.dloop.enabled) {
+                if (p >= o.max_context) break;
+                T = std::min(T, (int) (o.max_context - p));
+            }
+#endif
             if (p + T > o.max_context) {
                 std::fprintf(stderr, "strata generate: ran out of context at position %lld\n", (long long) p);
                 return 2;

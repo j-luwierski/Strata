@@ -1,5 +1,6 @@
 """NAVER DLoop choices shared by fresh setup and installed-config edits."""
 import math
+import subprocess
 
 FLAGS = ("--dloop", "--dloop-block-size", "--dloop-gate", "--dloop-max-loops")
 MANAGED = ("--spec", "--spec-min-p", "--mtp-max-t")
@@ -7,13 +8,14 @@ MANAGED = ("--spec", "--spec-min-p", "--mtp-max-t")
 
 def arguments(parser):
     parser.add_argument("--dloop", choices=("on", "off"), help="experimental NAVER DLoop with stock MTP weights")
+    parser.add_argument("--dloop-calibrate", action="store_true", help="measure DLoop settings and keep a faster token-matching choice")
     parser.add_argument("--dloop-block-size", type=int, help="drafts per block (default 3)")
     parser.add_argument("--dloop-gate", type=float, help="latest block log probability threshold (default -0.5)")
     parser.add_argument("--dloop-max-loops", type=int, help="blocks per verification (default 2; block * loops <= 7)")
 
 
 def requested(a):
-    return any(getattr(a, n, None) is not None for n in ("dloop", "dloop_block_size", "dloop_gate", "dloop_max_loops"))
+    return getattr(a, "dloop_calibrate", False) or any(getattr(a, n, None) is not None for n in ("dloop", "dloop_block_size", "dloop_gate", "dloop_max_loops"))
 
 
 def validate(c):
@@ -99,5 +101,8 @@ def apply(cfg, choice):
 
 def capability(exe, run):
     """Use the installed engine's help, never assume a stock archive supports DLoop."""
-    result = run([str(exe), "--help"], capture_output=True, text=True, timeout=60)
+    try:
+        result = run([str(exe), "--help"], capture_output=True, text=True, timeout=60)
+    except (OSError, TimeoutError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0 and "--dloop-block-size" in result.stdout + result.stderr

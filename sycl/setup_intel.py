@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -231,6 +232,17 @@ def install(argv) -> None:
     S.amd_gpus = lambda *a, **k: intel
     S.amd_problem = lambda g: None
     S.hip_vision = lambda asked: "none"                 # images are not wired on the SYCL port yet
+    # Inspect the actual container binary, not setup's metadata-only stub. No
+    # named serving container is removed or restarted for this capability check.
+    def dloop_capability(_exe, _run):
+        try:
+            check = subprocess.run(["docker", "run", "--rm", "-v", f"{MOUNT.resolve()}:/work", SYCL_IMAGE,
+                                    shlex.quote(sycl_path(exe)) + " --help"],
+                                   capture_output=True, text=True, timeout=60)
+            return check.returncode == 0 and "--dloop-block-size" in check.stdout + check.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    S.DLOOP.capability = dloop_capability
     S.build_engine_hip = lambda *a, **k: stub
     S.hipblaslt_table = lambda *a, **k: None
     S.ram_gb = lambda: fake_ram                         # the experts are in VRAM: setup's RAM rule does not apply

@@ -3952,6 +3952,8 @@ def calibrate_config(cfg_path: Path) -> bool:
             say(f"       the engine said: {why}")
         return False
     cfg["args"] = CAL.apply(cfg["args"], res["settings"])
+    if (cfg.get("dloop") or {}).get("enabled"):
+        DLOOP.apply(cfg, cfg["dloop"])
     write_config(cfg_path, cfg)
     st = load_settings()
     st.setdefault("calibration", {})[hardware_key(cfg)] = {"settings": res["settings"], "tok_s": res["report"].get("tok_s"),
@@ -3963,6 +3965,27 @@ def calibrate_config(cfg_path: Path) -> bool:
     else:
         ok("tuned for this PC: the default settings are already the fastest here"
            + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
+    return calibrate_dloop_config(cfg_path) if (cfg.get("dloop") or {}).get("enabled") else True
+
+
+def calibrate_dloop_config(cfg_path: Path) -> bool:
+    from tools import dloop_calibrate as DLC
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    say("  Calibrating DLoop: block size, gate and loop count; compared with the same drafter without loops.")
+    say("  Each candidate must match greedy tokens and beat baseline by at least 3%; the PC is busy meanwhile.")
+    try:
+        result = DLC.run(cfg, say=say)
+    except Exception as e:
+        warn(f"DLoop calibration did not finish ({e}); the previous DLoop settings stay")
+        return False
+    DLOOP.apply(cfg, result["choice"])
+    if result["choice"]["enabled"]:
+        from tools import calibrate as CAL
+        budget = CAL.arg_value(result["report"]["base_args"], "--expert-cache")
+        cfg["args"] = CAL.with_arg(cfg["args"], "--expert-cache", budget)
+    cfg["dloop_calibration"] = result["report"]
+    write_config(cfg_path, cfg)
+    ok("DLoop calibration: " + result["report"]["winner"])
     return True
 
 
@@ -4740,6 +4763,9 @@ def main() -> int:
                 fail("built engine does not advertise DLoop support")
         write_setup_config(pick, cfg)
         ok("DLoop " + ("enabled" if choice["enabled"] else "disabled"))
+        if choice["enabled"] and (a.dloop_calibrate or not a.yes and ask(
+                "Calibrate DLoop now? (later: ./setup.sh --dloop-calibrate --yes --no-start)", ["y", "n"], "n", a.yes) == "y"):
+            calibrate_dloop_config(pick)
         return 0 if a.no_start or a.update else start(pick, a.port, a.gpu, yes=a.yes)
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
@@ -5252,7 +5278,10 @@ def main() -> int:
                 "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
     try:
-        dloop_choice = DLOOP.choose(a, ask, say, json.loads(adopted.read_text(encoding="utf-8-sig")).get("dloop") if adopted else None)
+        previous_dloop_path = ROOT / f"strata-{tag}.json"
+        previous_dloop_path = previous_dloop_path if previous_dloop_path.exists() else adopted
+        previous_dloop = json.loads(previous_dloop_path.read_text(encoding="utf-8-sig")).get("dloop") if previous_dloop_path else None
+        dloop_choice = DLOOP.choose(a, ask, say, previous_dloop)
     except ValueError as e:
         fail(str(e))
     if dloop_choice["enabled"] and a.parallel and a.parallel > 1:
@@ -5575,6 +5604,9 @@ def main() -> int:
     except ValueError as e:
         fail(str(e))
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
+    if dloop_choice["enabled"] and (a.dloop_calibrate or not a.yes and ask(
+            "Calibrate DLoop now? (later: ./setup.sh --dloop-calibrate --yes --no-start)", ["y", "n"], "n", a.yes) == "y"):
+        calibrate_dloop_config(cfg_path)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
     if cal is None and not hip and not a.no_start and not a.yes and ask(

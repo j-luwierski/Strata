@@ -63,7 +63,8 @@ def main():
                            "--window-hashes", str((a.out / (stem + '.windows')).resolve()), *flags]
                 print(f"{stem}: running full native model", flush=True)
                 start = time.monotonic()
-                run = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+                run = subprocess.run(command, capture_output=True, text=True, timeout=1800,
+                                     env={**__import__("os").environ, "STRATA_PREFILL_CPU_SHARE": "0"})
                 (a.out / (stem + ".log")).write_text(run.stdout + '\n' + run.stderr)
                 if run.returncode:
                     raise RuntimeError(f"{stem} failed ({run.returncode}); see its log")
