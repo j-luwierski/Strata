@@ -4,6 +4,9 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#ifdef STRATA_ENABLE_STEPQUANT
+#include "strata/kernels/stepquant.hpp"
+#endif
 #include "strata/core/layer.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/bf16_bits.hpp"
@@ -220,6 +223,18 @@ q8k_bytes(V),
 // conv_state
 };    uint64_t total = 0;    for (uint64_t v : parts) total += (v + 15) & ~(uint64_t) 15;    return total;}
 uint64_t gdn_buffers_init(const ModelGeometry& g, void* base, GdnBuffers& b) {    const int64_t C = g.ssm_conv_channels;    const int64_t V = g.ssm_value_dim;    const uint64_t parts[] = {        q8k_bytes(g.n_embd), (uint64_t) (g.n_embd / 32) * 34, (uint64_t) g.n_embd * 2, (uint64_t) C * 4,        (uint64_t) C * 4, (uint64_t) C * 4,        (uint64_t) g.ssm_v_heads * 4, (uint64_t) g.ssm_v_heads * 4, (uint64_t) g.ssm_v_heads * 4,        (uint64_t) g.ssm_v_heads * g.ssm_state_size * 4, (uint64_t) V * 4, (uint64_t) V * 4, q8k_bytes(V),        (uint64_t) (V / 32) * 34,        (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size * 4, (uint64_t) C * (g.ssm_d_conv - 1) * 4,    };    uint8_t* p = (uint8_t*) base;    void* ptr[16];    uint64_t total = 0;    for (int i = 0; i < 16; ++i) {        ptr[i] = p;        const uint64_t al = (parts[i] + 15) & ~(uint64_t) 15;        p += al;        total += al;    }    b.x_q8k = (uint8_t*) ptr[0];    b.x_q8_0 = (uint8_t*) ptr[1];    b.x_bf16 = (uint16_t*) ptr[2];    b.qkv = (float*) ptr[3];    b.conv_out = (float*) ptr[4];    b.h = (float*) ptr[5];    b.alpha = (float*) ptr[6];    b.beta = (float*) ptr[7];    b.gate = (float*) ptr[8];    b.o = (float*) ptr[9];    b.z = (float*) ptr[10];    b.y = (float*) ptr[11];    b.y_q8k = (uint8_t*) ptr[12];    b.y_q8_0 = (uint8_t*) ptr[13];    b.state = (float*) ptr[14];    b.conv_state = (float*) ptr[15];    return total;}
+#ifdef STRATA_ENABLE_STEPQUANT
+void gdn_buffers_zero_state(const GdnBuffers& b, const ModelGeometry& g, void* stream) {
+    const uint64_t cs = (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*sizeof(float);
+    if (strata::kernels::stepquant_zero_layer(b.state, stream)) {
+        strata::q_of(stream)->memset(b.conv_state, 0, cs);
+        return;
+    }
+    const uint64_t st = (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size*sizeof(float);
+    strata::q_of(stream)->memset(b.state, 0, st);
+    strata::q_of(stream)->memset(b.conv_state, 0, cs);
+}
+#else
 void gdn_buffers_zero_state(const GdnBuffers &b, const ModelGeometry &g,
                             void *stream) {
     const uint64_t st = (uint64_t)g.ssm_state_size * g.ssm_v_heads *
@@ -229,6 +244,7 @@ void gdn_buffers_zero_state(const GdnBuffers &b, const ModelGeometry &g,
     strata::q_of(stream)-> memset(b.state, 0, st);
     strata::q_of(stream)->memset(b.conv_state, 0, cs);
 }
+#endif
 // Forward-declared because `gdn_layer` and `qsa_layer` are both defined above the timer's own definition, and
 // the sub-stage marks live inside them.
 static void st_begin(int64_t layer, int slot, void* stream);
@@ -337,6 +353,16 @@ st_begin(layer, 12, stream);
     } catch (const std::exception& error) { err = v.name("gdn_gate") + ": " + error.what(); return false; }
     st_end(layer, 12, stream); st_begin(layer, 13, stream);
     GdnShapes gs{g.ssm_state_size, g.ssm_k_heads, g.ssm_v_heads};
+#ifdef STRATA_ENABLE_STEPQUANT
+    GdnBuffers scratch_buffers = b;
+    if (stepquant_enabled()) {
+        scratch_buffers.state = b.stepquant_scratch;
+        try { stepquant_read((int) layer, b.state, scratch_buffers.state, stream); }
+        catch (const std::exception& e) { err = e.what(); return false; }
+    }
+    void* packed_slot = b.state;
+    { const GdnBuffers& b = scratch_buffers;
+#endif
     // Plan v0.3 P3: with the native contract the step and the output norm are one kernel (after the z GEMV).
     const bool fused_gdn = g_fused_gdn && native_gdn_enabled() && g.ssm_state_size == 128;
     if (!fused_gdn) try {
@@ -359,7 +385,15 @@ try {
     else if (native_gdn_enabled()) native_gdn_out_norm(b.o, b.z, ssm_norm, b.y, g.ssm_v_heads, g.ssm_state_size, RMS_EPS, stream);
     else gdn_out_norm(b.o, b.z, ssm_norm, b.y, g.ssm_v_heads, g.ssm_state_size, RMS_EPS, stream);
 } catch (const std::exception& error) { err = v.name("gdn_out_norm") + ": " + error.what(); return false; }
+#ifdef STRATA_ENABLE_STEPQUANT
+// Readout uses the FP32 update; only the packed state is carried to the next token.
+try { stepquant_writeback((int) layer, packed_slot, b.state, stream); }
+catch (const std::exception& e) { err = v.name("stepquant") + ": " + e.what(); return false; }
+#endif
 st_end(layer, 14, stream);
+#ifdef STRATA_ENABLE_STEPQUANT
+    }
+#endif
 // ---- 8. out = ssm_out @ y, whose activation is whatever THIS layer's `ssm_out` asks for
 st_begin(layer, 15, stream);
     if (!w_out->native_data) {

@@ -1,6 +1,9 @@
 // sycl/src/core/conversation_state.cpp - SYCL port of src/core/conversation_state.cpp (two CUDA calls, by hand).
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
+#ifdef STRATA_ENABLE_STEPQUANT
+#include "strata/kernels/stepquant.hpp"
+#endif
 #include "strata/core/conversation_snapshot.hpp"
 #include "conversation_checked.hpp"
 
@@ -116,6 +119,10 @@ bool metadata_bytes(const ConversationCheckpoint& c, size_t& total) {
 
 bool conversation_state_sizes(const ModelGeometry& g, ConversationStateSizes& z, std::string& error) {
     z = {};
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (!strata::kernels::stepquant_accepts_geometry((int) g.n_layers, (int) g.qsa_interval,
+            (int) g.ssm_v_heads, (int) g.ssm_state_size)) return fail(error, "geometry differs from STEPQuant plan");
+#endif
     const auto key = geometry_key(g);
     for (size_t i = 0; i < key.size(); ++i)
         if (key[i] < 0 || (i != 1 && key[i] == 0)) return fail(error, "invalid model geometry");
@@ -129,6 +136,10 @@ bool conversation_state_sizes(const ModelGeometry& g, ConversationStateSizes& z,
                           (uint64_t) g.idx_key_dim, sizeof(float)}) ||
         !product(z.dead, {(uint64_t) g.idx_key_dim, sizeof(float)}))
         return fail(error, "running-state byte count overflow");
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled())
+        z.gdn = (size_t) g.n_gdn_layers()*(strata::kernels::stepquant_recurrence_bytes() + convolution*sizeof(float));
+#endif
     z.block_pos = sizeof(int32_t);
     size_t total = 0;
     if (!product(total, {(uint64_t) g.n_qsa_layers(), z.tail}) ||
@@ -159,6 +170,10 @@ bool conversation_checkpoint_validate(const ConversationCheckpoint& c, const Ses
         c.tails.size() != layers * z.tail || c.dead.size() != layers * z.dead ||
         c.block_pos.size() != layers * z.block_pos || !image_keys(c.imgs, c.ids.size()))
         return fail(error, "invalid checkpoint running-state payload");
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (!strata::kernels::stepquant_validate_session(c.gdn.data(), c.gdn.size(),
+            (size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, (int) ss.gdn_alloc, (int) ss.gdn_ord0, error)) return false;
+#endif
     return true;
 }
 

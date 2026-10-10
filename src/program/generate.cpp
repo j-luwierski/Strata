@@ -576,6 +576,7 @@ struct Options {
     /// from each GPU's free VRAM); empty = one GPU
 #ifdef STRATA_ENABLE_STEPQUANT
     std::string stepquant_plan;
+    std::string stepquant_trace;
 #endif
     std::string layer_split;
     /// the later stages' devices "D1,D2,.." (default: the next visible GPUs; "0" with one K: both stages on this
@@ -652,7 +653,8 @@ struct Options {
 
 void usage() {
 #ifdef STRATA_ENABLE_STEPQUANT
-    std::fprintf(stderr, "  --stepquant-plan FILE  experimental packed GDN state (requires --spec 0)\n");
+    std::fprintf(stderr, "  --stepquant-plan FILE  packed GDN state with calibrated per-head precision\n");
+    std::fprintf(stderr, "  --stepquant-trace DIR  collect bounded unquantized prompt traces for calibration\n");
 #endif
     std::fprintf(stderr,
                  "strata generate --pack DIR --tokens \"1,2,3\" [options]\n"
@@ -1640,6 +1642,7 @@ int main(int argc, char** argv) {
         else if (a == "--gpu") { (void) next("--gpu"); }   // applied at startup, before any CUDA call
 #ifdef STRATA_ENABLE_STEPQUANT
         else if (a == "--stepquant-plan") o.stepquant_plan = next("--stepquant-plan");
+        else if (a == "--stepquant-trace") o.stepquant_trace = next("--stepquant-trace");
 #endif
         else if (a == "--pack") o.pack = next("--pack");
         else if (a == "--tokens") {
@@ -2210,16 +2213,6 @@ int main(int argc, char** argv) {
         if (o.mtp_max_t == 0) o.mtp_max_t = o.spec;
         o.spec = std::max(o.spec, std::min(o.mtp_max_t + o.lookup_chain, 8));   // kVerifyMaxT
     }
-#ifdef STRATA_ENABLE_STEPQUANT
-    if (!o.stepquant_plan.empty() && o.serve) {
-        std::fprintf(stderr, "strata: --stepquant-plan currently supports generate only; --serve uses the unsupported verifier path\n");
-        return 2;
-    }
-    if (!o.stepquant_plan.empty() && (o.spec >= 2 || o.batch > 0 || !o.layer_split.empty() || o.pipeline_windows > 0)) {
-        std::fprintf(stderr, "strata: --stepquant-plan currently requires --spec 0, no --batch, --layer-split or --pipeline-windows\n");
-        return 2;
-    }
-#endif
     strata::core::layer_set_shared_early(!o.shared_late);
     if (!o.native_preset.empty()) {
         try {
@@ -2503,6 +2496,18 @@ int main(int argc, char** argv) {
     int64_t K = 10;
 #ifdef STRATA_ENABLE_STEPQUANT
     // Created before weights/session arenas and graphs, so the cache planner sees its scratch memory.
+    if (!o.stepquant_trace.empty()) {
+        if (!o.stepquant_plan.empty() || o.serve || o.batch > 0 || o.pipeline_windows > 0 || !o.layer_split.empty()) {
+            std::fprintf(stderr,"strata: calibration trace requires unquantized single-session generate\n");
+            return 2;
+        }
+        if (o.native_preset.empty() || o.prefill_chunk <= 0) {
+            std::fprintf(stderr,"strata: calibration trace requires --native SHARD1 and --prefill CHUNK\n");
+            return 2;
+        }
+        try { strata::kernels::stepquant_trace_configure(o.stepquant_trace); }
+        catch (const std::exception& e) { std::fprintf(stderr,"strata: %s\n",e.what()); return 2; }
+    }
     struct StepQuantCleanup { ~StepQuantCleanup() { strata::kernels::stepquant_release(); } } stepquant_cleanup;
     if (!o.stepquant_plan.empty()) {
         try {
@@ -2511,7 +2516,7 @@ int main(int argc, char** argv) {
         } catch (const std::exception& e) {
             std::fprintf(stderr, "strata: %s\n", e.what()); return 2;
         }
-        std::fprintf(stderr, "strata: STEPQuant: packed per-layer GDN state, one FP32 scratch matrix; experimental plain decode\n");
+        std::fprintf(stderr, "strata: STEPQuant: packed per-layer GDN state, per-session FP32 scratch; decode and verification\n");
     }
 #endif
     // THE ROPE CONFIG RESOLVES HERE, BEFORE ANY WEIGHT MOVES - the CLI and the model file have both spoken,
@@ -3265,6 +3270,10 @@ int main(int argc, char** argv) {
     const int64_t kPipeWindowMib = o.pipeline_windows > 0 ? 160 : 0;
     const int64_t kPipeSnapMib = o.pipeline_windows >= 2 ? 96 : 0;   // ~3 MiB per GDN layer, twice, ~15 layers
     auto gdn_snapshot_bytes = [&](const strata::core::SessionState& s0) -> size_t {
+#ifdef STRATA_ENABLE_STEPQUANT
+        if (strata::kernels::stepquant_enabled()) return (size_t) s0.gdn_alloc *
+            (strata::kernels::stepquant_recurrence_bytes() + (size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4);
+#endif
         return (size_t) s0.gdn_alloc * ((size_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                         (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1)) * sizeof(float);
     };

@@ -1,10 +1,15 @@
 #include "strata/kernels/stepquant.hpp"
 #include "strata/kernels/native_gdn.hpp"
+#include "strata/kernels/fused_gdn.hpp"
 #include "strata/core/session.hpp"
 #include "strata/core/conversation_snapshot.hpp"
 #include <filesystem>
 #include <chrono>
+#ifdef STRATA_STEPQUANT_TEST_SYCL
+#include "../sycl/stepquant_runtime.hpp"
+#else
 #include <cuda_runtime.h>
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -86,7 +91,7 @@ void session_storage(cudaStream_t stream, bool canonical) {
     struct Cleanup { std::filesystem::path path; ~Cleanup() { stepquant_release(); std::error_code e; std::filesystem::remove(path,e); } } cleanup{path};
     ModelGeometry g;
     if (!canonical) {
-        g.n_layers=2; g.qsa_interval=2; g.ssm_v_heads=5; g.ssm_k_heads=1;
+        g.n_layers=4; g.qsa_interval=2; g.ssm_v_heads=5; g.ssm_k_heads=1;
         g.ssm_value_dim=5*128; g.ssm_conv_channels=7*128;
     }
     const size_t H=(size_t)g.ssm_v_heads, layers=(size_t)g.n_gdn_layers(), elements=H*128*128;
@@ -117,11 +122,11 @@ void session_storage(cudaStream_t stream, bool canonical) {
     const size_t conv=(size_t)g.ssm_conv_channels*(g.ssm_d_conv-1)*4;
     require(sizes.gdn==layers*(stepquant_recurrence_bytes()+conv),"snapshot byte estimate ignored packed stride");
     Buffer dense(elements);
-    stepquant_read(0,dense.p,stream); ck(cudaStreamSynchronize(stream));
+    stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     compare(dense.download(elements),std::vector<float>(elements,0.f),0.f);
     std::vector<float> x(elements);
     for(size_t i=0;i<x.size();++i) x[i]=std::sin(float(i)*0.01f)*0.1f;
-    dense.upload(x); stepquant_writeback(0,dense.p,stream); stepquant_read(0,dense.p,stream); ck(cudaStreamSynchronize(stream));
+    dense.upload(x); stepquant_writeback(0,ss.gdn_state,dense.p,stream); stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     const auto expected=dense.download(x.size());
     ConversationCheckpoint checkpoint; checkpoint.ids={1};
     require(conversation_checkpoint_save(checkpoint,ss,g,error),error);
@@ -130,11 +135,66 @@ void session_storage(cudaStream_t stream, bool canonical) {
     require(!conversation_checkpoint_validate(corrupted,ss,g,error),"foreign plan header accepted");
     auto b=ss.gdn; b.state=ss.gdn_state; b.conv_state=ss.gdn_state+stepquant_recurrence_bytes()/4;
     gdn_buffers_zero_state(b,g,stream); ck(cudaStreamSynchronize(stream));
-    stepquant_read(0,dense.p,stream); ck(cudaStreamSynchronize(stream));
+    stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     compare(dense.download(x.size()),std::vector<float>(x.size(),0.f),0.f);
     require(conversation_checkpoint_restore(checkpoint,ss,g,error),error);
-    stepquant_read(0,dense.p,stream); ck(cudaStreamSynchronize(stream));
+    stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
     compare(dense.download(x.size()),expected,0.f);
+    if (!canonical) {
+        // Independent full and range sessions share only immutable plan metadata.
+        Buffer second((packed_bytes+3)/4), ranged((packed_bytes+3)/4);
+        SessionState other, range;
+        require(session_init(g,16,10,second.p,other)>0,"second session rejected");
+        require(session_init(g,16,10,ranged.p,range,2,4)>0,"range session rejected");
+        require(range.gdn_ord0==1 && range.gdn_alloc==1,"wrong split ordinals");
+        session_zero(other,g,nullptr,stream); session_zero(range,g,nullptr,stream);
+        stepquant_read(2,range.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        compare(dense.download(elements),std::vector<float>(elements,0.f),0.f);
+        // A proposal reads the compressed state but cannot advance it. Commit graphs
+        // use a device counter, so every prefix, including zero, is replayed here.
+        const int T=4, C=(int)g.ssm_conv_channels, V=(int)g.ssm_value_dim, HK=(int)g.ssm_k_heads;
+        Buffer h(T*C), gate(T*H), beta(T*H), z(T*V), gamma(128), y(T*V), scratch(elements), expected_state(elements), keep(1);
+        std::vector<float> hv(T*C), gv(T*H,-.2f), bv(T*H,.35f), zv(T*V,.1f);
+        for (size_t i=0;i<hv.size();++i) hv[i]=std::sin(float(i)*.13f)*.05f;
+        h.upload(hv); gate.upload(gv); beta.upload(bv); z.upload(zv); gamma.upload(std::vector<float>(128,1.f));
+        StepQuantState reference_state({{2,4,6,8,16},std::vector<float>(H*128,1.f)});
+        reference_state.unpack(expected_state.p,stream);
+        std::vector<std::vector<float>> states{std::vector<float>(elements,0.f)}, outputs;
+        Buffer yo(V);
+        for(int t=0;t<T;++t) {
+            fused_gdn_step_norm(expected_state.p,h.p+t*C,h.p+t*C+HK*128,h.p+t*C+2*HK*128,
+                gate.p+t*H,beta.p+t*H,z.p+t*V,gamma.p,1e-6f,yo.p,HK,(int)H,stream);
+            reference_state.writeback(expected_state.p,stream); ck(cudaStreamSynchronize(stream));
+            states.push_back(expected_state.download(elements)); outputs.push_back(yo.download(V));
+        }
+        stepquant_verify(0,other.gdn_state,scratch.p,other.gdn.stepquant_temporary,h.p,C,gate.p,beta.p,z.p,
+            gamma.p,1e-6f,y.p,HK,(int)H,T,nullptr,stream);
+        stepquant_read(0,other.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        compare(dense.download(elements),states[0],0.f);
+        auto actual_output=y.download(T*V);
+        for(int t=0;t<T;++t) compare(std::vector<float>(actual_output.begin()+t*V,actual_output.begin()+(t+1)*V),outputs[t],0.f);
+        cudaGraph_t graph=nullptr; cudaGraphExec_t exec=nullptr;
+        ck(cudaStreamBeginCapture(stream,cudaStreamCaptureModeGlobal));
+        stepquant_verify(0,other.gdn_state,scratch.p,other.gdn.stepquant_temporary,h.p,C,gate.p,beta.p,z.p,
+            gamma.p,1e-6f,y.p,HK,(int)H,T,reinterpret_cast<int32_t*>(keep.p),stream);
+        ck(cudaStreamEndCapture(stream,&graph)); ck(cudaGraphInstantiate(&exec,graph,nullptr,nullptr,0));
+        for(int n=0;n<=T;++n) {
+            session_zero(other,g,nullptr,stream);
+            ck(cudaMemcpyAsync(keep.p,&n,4,cudaMemcpyHostToDevice,stream));
+            ck(cudaGraphLaunch(exec,stream)); stepquant_read(0,other.gdn_state,dense.p,stream);
+            ck(cudaStreamSynchronize(stream)); compare(dense.download(elements),states[n],0.f);
+        }
+        // A different session's checkpoint survives interleaved verifier work.
+        stepquant_read(0,ss.gdn_state,dense.p,stream); ck(cudaStreamSynchronize(stream));
+        compare(dense.download(elements),expected,0.f);
+        ConversationCheckpoint split_checkpoint; split_checkpoint.ids={2};
+        require(conversation_checkpoint_save(split_checkpoint,range,g,error),error);
+        require(conversation_checkpoint_validate(split_checkpoint,range,g,error),error);
+        ck(cudaGraphExecDestroy(exec)); ck(cudaGraphDestroy(graph));
+        session_release(other); delete[] other.qsa_states;
+        session_release(range); delete[] range.qsa_states;
+        std::printf("independent sessions, split ranges, proposals, every accepted prefix and captured commits: PASS\n");
+    }
     session_release(ss); delete[] ss.qsa_states;
     std::printf("packed session + checkpoint restore: dense=%zu packed=%zu saved=%zu bytes\n",dense_bytes,packed_bytes,dense_bytes-packed_bytes);
 }
@@ -172,7 +232,17 @@ void basic(cudaStream_t stream) {
     bool rejected=false;
     try { StepQuantState invalid({{4},std::vector<float>(128,-1.f)}); } catch(const std::invalid_argument&) { rejected=true; }
     require(rejected,"invalid impact accepted");
-    std::printf("packed storage, zero states, pivots, CUDA graphs and invalid plans: PASS\n");
+    const auto directory=std::filesystem::temp_directory_path()/
+        ("strata-stepquant-trace-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    Buffer h(256), gate(5), beta(5);
+    h.upload(std::vector<float>(256,.05f)); gate.upload(std::vector<float>(5,-.1f)); beta.upload(std::vector<float>(5,.5f));
+    stepquant_trace_configure(directory.string(),1,1);
+    stepquant_observe(0,h.p,gate.p,beta.p,state.p,1,5,stream);
+    stepquant_observe(0,h.p,gate.p,beta.p,state.p,1,5,stream);
+    stepquant_release();
+    require(std::filesystem::file_size(directory/"layer-0.bin")==28+4+(256+10+N)*4,"trace limit/layout mismatch");
+    std::filesystem::remove_all(directory);
+    std::printf("packed storage, zero states, pivots, GPU graphs, bounded traces and invalid plans: PASS\n");
 }
 }
 int main(int argc,char** argv) {

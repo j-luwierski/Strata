@@ -4912,5 +4912,17 @@ class UntimedReads(unittest.TestCase):
         self.assertEqual(v._readline(5.0, "x"), "OK 7 1 1 1\n")
 
 
+class StepQuantArgs(unittest.TestCase):
+    def test_opt_in_plan(self):
+        self.assertEqual(engine_args({"args": ["--native", "x"], "stepquant_plan": "calibrated.plan"}),
+                         ["--native", "x", "--stepquant-plan", "calibrated.plan"])
+        self.assertEqual(engine_args({"args": ["--native", "x"]}), ["--native", "x"])
+
+    def test_explicit_argument_precedes_config(self):
+        args = ["--native", "x", "--stepquant-plan", "explicit.plan"]
+        self.assertEqual(engine_args({"args": args, "stepquant_plan": "config.plan"}), args)
+        with self.assertRaises(ValueError): engine_args({"args": [], "stepquant_plan": True})
+
+
 if __name__ == "__main__":
     unittest.main()

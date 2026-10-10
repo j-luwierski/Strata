@@ -84,6 +84,7 @@ struct GdnBuffers {
 
     // the recurrent state, which outlives the call
 #ifdef STRATA_ENABLE_STEPQUANT
+    void* stepquant_temporary = nullptr; ///< session-owned packed scratch for speculative recurrence
     float* stepquant_scratch = nullptr; // shared FP32 matrix; persistent states live in packed session slots
 #endif
     float* state = nullptr;        ///< S * h_v * S

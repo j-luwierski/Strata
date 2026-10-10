@@ -68,6 +68,9 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
     const int64_t gdn_n = std::max<int64_t>((layer_hi - layer_lo) - std::max<int64_t>(q_hi - q_lo, 0), 0);
     uint64_t n = 0;
     n += gdn_buffers_bytes(g);
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled()) n += strata::kernels::stepquant_recurrence_bytes();
+#endif
     n += (uint64_t) gdn_n * gdn_state_floats(g) * 4;
     // One QSA state carries the RoPE table; the others borrow it (P7: 64 MiB per layer at 262K).
     if (g.n_qsa_layers() > 0)
@@ -109,6 +112,7 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     gdn_buffers_init(g, take(gdn_buffers_bytes(g)), s.gdn);
 #ifdef STRATA_ENABLE_STEPQUANT
     s.gdn.stepquant_scratch = s.gdn.state;
+    s.gdn.stepquant_temporary = strata::kernels::stepquant_enabled() ? take(strata::kernels::stepquant_recurrence_bytes()) : nullptr;
 #endif
     s.gdn_state = (float*) take((uint64_t) s.gdn_alloc * gdn_state_floats(g) * 4);
 #ifdef STRATA_ENABLE_STEPQUANT

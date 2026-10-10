@@ -3,6 +3,9 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#ifdef STRATA_ENABLE_STEPQUANT
+#include "strata/kernels/stepquant.hpp"
+#endif
 #include "strata/prefill/prefill.hpp"
 #include "strata/core/gguf_expert_source.hpp"
 #include "../../../src/prefill/mmq_resident_sort.hpp"
@@ -2111,8 +2114,14 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
         ~KvDrain() { if (stream) stream->wait(); }
     } kv_drain{kv_prefetch ? m.kv_copy : &dpct::get_in_order_queue()};
     int64_t kv_prefetches = 0;
+#ifdef STRATA_ENABLE_STEPQUANT
+    const uint64_t gdn_floats = strata::kernels::stepquant_enabled()
+        ? strata::kernels::stepquant_recurrence_bytes()/4 + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1)
+        : (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
+#else
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+#endif
     int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
     // layer split: a prompt of one chunk runs the stages one after the other, so the next stage's GPU idles while
     // this one reads; it streams and computes a share of this stage's experts then (set_stage_helper), in the
@@ -2862,6 +2871,15 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                     pt.mark(kPfGdn, cs);
                     float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+                    void* packed_slot = state;
+                    if (strata::kernels::stepquant_enabled()) {
+                        conv = state + strata::kernels::stepquant_recurrence_bytes()/4;
+                        state = ss.gdn.stepquant_scratch;
+                        try { strata::kernels::stepquant_read((int) l, packed_slot, state, m.cs); }
+                        catch (const std::exception& e) { err = e.what(); return false; }
+                    }
+#endif
                     if (!native_proj(m.gemm, wqkv, m.mixed_h, m.qkv, T, v.name("attn_qkv.weight"), err)) return false;
                     if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name("attn_gate.weight"), err)) return false;
                     if (!bf16_proj(m.gemm, wa, m.mixed_bf, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
@@ -2871,8 +2889,24 @@ bool Prefill::run_impl(const int64_t *tokens, int64_t n, int64_t pos0,
                     gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, EPS, m.cs);
                     pt.mark(kPfGdnRec, cs);
                     const int64_t ld_y = pf_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) ? ZV + ZV_PAD : 0;
+#ifdef STRATA_ENABLE_STEPQUANT
+                    if (strata::kernels::stepquant_trace_enabled()) {
+                        const int64_t stride = ld_y ? ld_y : ZV;
+                        for (int64_t t = 0; t < T; ++t) {
+                            gdn_recurrence(state, m.hbuf+t*C, m.gate+t*HV, m.beta+t*HV, m.z+t*ZV,
+                                           (const float*) wnm->data, EPS, m.y+t*ZV, m.y_h+t*stride, 1, m.cs, ld_y);
+                            strata::kernels::stepquant_observe((int) l, m.hbuf+t*C, m.gate+t*HV, m.beta+t*HV,
+                                                              state, (int) g.ssm_k_heads, (int) HV, m.cs);
+                        }
+                    } else
+#endif
                     gdn_recurrence(state, m.hbuf, m.gate, m.beta, m.z, (const float*) wnm->data, EPS, m.y, m.y_h, T, m.cs,
                                    ld_y);
+#ifdef STRATA_ENABLE_STEPQUANT
+                    // Prompt recurrence/readouts stay FP32; writeback is at each prefill chunk boundary.
+                    try { strata::kernels::stepquant_writeback((int) l, packed_slot, state, m.cs); }
+                    catch (const std::exception& e) { err = e.what(); return false; }
+#endif
                     pt.mark(kPfGdnOut, cs);
                     if (!native_proj(m.gemm, wo, m.y_h, m.bo, T, v.name("ssm_out.weight"), err, 0, ld_y)) return false;
                     ++gdn_index;

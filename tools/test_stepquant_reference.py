@@ -15,6 +15,33 @@ import sys
 import tempfile
 
 
+def check_calibration(torch, np):
+    # Separate seeded fixture: upstream is an oracle, never a runtime dependency.
+    from stepquant_calibrate import impact_factors, lifetime, allocate, calibrate
+    from stepquant.core import impact_factors as reference_impact, lifetime_weight
+    from stepquant.allocation import allocate_dp
+    from stepquant.calibration import calibrate as reference_calibrate
+    rng = np.random.default_rng(212)
+    statistics = {i: dict(omega=rng.uniform(.01,1,(5,128)), decay=-rng.uniform(0,.1,5),
+                         samples=[rng.normal(0,.1,(5,128,128)).astype('f4')], tokens=8, heads=5) for i in (0,2)}
+    for stat in statistics.values():
+        np.testing.assert_allclose(impact_factors(stat['omega']),
+                                   reference_impact(torch.from_numpy(stat['omega'])).numpy(), rtol=1e-7)
+        np.testing.assert_allclose(lifetime(stat['decay'],2048),
+                                   lifetime_weight(torch.from_numpy(stat['decay']),2048).numpy(), rtol=1e-14)
+    cost = rng.uniform(0,1,(20,4))
+    np.testing.assert_array_equal(allocate(cost,[2,4,6,8],80), allocate_dp(cost,[2,4,6,8],80).numpy())
+    reference_stats = {str(i): dict(architecture='gdn',omega=torch.from_numpy(stat['omega']),
+        log_decay=torch.from_numpy(stat['decay']), snapshots=torch.from_numpy(np.stack(stat['samples'])),
+        tokens=stat['tokens']) for i,stat in statistics.items()}
+    for nominal in (4,6):
+        actual = calibrate(statistics,nominal,2)
+        expected = reference_calibrate(reference_stats,nominal,2)
+        for i,(bits,_) in actual.items():
+            np.testing.assert_array_equal(bits,expected['plans'][str(i)]['bits'][:,0].numpy())
+    print('upstream calibration PASS: impact, lifetime, exact DP and @4/@6 global allocations')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--upstream", type=Path, required=True)
@@ -163,6 +190,8 @@ def main():
         assert offset == len(raw), "trailing/missing trace data"
         print(f"upstream parity PASS: {args.steps} updates, max readout error {max_readout:.9g}, "
               f"max fit error {max_fit:.9g}, stored-scale rounding ties {rounding_boundaries}")
+
+    check_calibration(torch, np)
 
 
 if __name__ == "__main__":

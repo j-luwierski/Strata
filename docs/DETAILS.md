@@ -1651,6 +1651,7 @@ The prompt path's half-output buffer `bo` reuses the embedding buffer `emb`, whi
 
 ### Experimental STEPQuant GDN state quantization
 
-The opt-in CUDA port and its current limits are described in [STEPQUANT.md](STEPQUANT.md).
-The engine mode stores persistent GDN states in packed session slots and uses one shared FP32 scratch matrix.
-It requires plain decode on one CUDA device; speculative and batch verification are not supported.
+The opt-in implementation, calibration workflow and validation limits are described in [STEPQUANT.md](STEPQUANT.md).
+Persistent GDN states live in packed session slots, with FP32 scratch owned by each session.
+Decode, speculative/batch verification, server checkpoints and layer ranges use the packed format. CUDA was tested;
+HIP and SYCL source support still needs compilation and device validation on those backends.

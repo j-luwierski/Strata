@@ -9,10 +9,7 @@
 # and is wrong about its own performance, which is the worst of both outcomes.
 cmake_minimum_required(VERSION 3.24)
 project(strata VERSION 0.1.41 LANGUAGES CXX)
-option(STRATA_ENABLE_STEPQUANT "Build experimental STEPQuant GDN state quantization (CUDA)" OFF)
-if(STRATA_ENABLE_STEPQUANT AND STRATA_ENABLE_SYCL)
-  message(FATAL_ERROR "STRATA_ENABLE_STEPQUANT is not implemented for SYCL")
-endif()
+option(STRATA_ENABLE_STEPQUANT "Build experimental STEPQuant GDN state quantization (CUDA/HIP/SYCL)" OFF)
 # EXPERIMENTAL: the Intel Arc engine, the SYCL port in sycl/ (PR #423; icpx + oneMKL, docs/INTEL_ARC.md). It is its
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
 option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
@@ -101,9 +98,9 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt AND EXISTS ${CMAKE_CU
   set(_strata_tests_default ON)
 endif()
 option(STRATA_BUILD_TESTS "Build the test suite" ${_strata_tests_default})
-# STEPQuant numerical validation port, CUDA only. Off keeps release targets unchanged.
-if(STRATA_ENABLE_STEPQUANT AND (NOT STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP OR STRATA_HIP_GFX906))
-  message(FATAL_ERROR "STRATA_ENABLE_STEPQUANT currently requires the native CUDA backend")
+# STEPQuant opt-in recurrent state codec. Off keeps release targets unchanged.
+if(STRATA_ENABLE_STEPQUANT AND NOT (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP))
+  message(FATAL_ERROR "STRATA_ENABLE_STEPQUANT requires a GPU backend")
 endif()
 option(STRATA_BUILD_CONVERSATION_TESTS "Build standalone conversation cache tests" OFF)
 option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
@@ -364,11 +361,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_sources(strata_kernels PRIVATE src/kernels/cuda/stepquant.cu)
     target_compile_definitions(strata_kernels PUBLIC STRATA_ENABLE_STEPQUANT=1)
     # Reproducible fit: no fast math, and match the reference's separately rounded products.
-    set_source_files_properties(src/kernels/cuda/stepquant.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
+    set_source_files_properties(src/kernels/cuda/stepquant.cu PROPERTIES COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>;$<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>")
     enable_testing()
     add_executable(stepquant_test tests/cuda/stepquant_test.cpp)
-    target_include_directories(stepquant_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(stepquant_test PRIVATE strata_engine CUDA::cudart)
+    target_include_directories(stepquant_test PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(stepquant_test PRIVATE strata_engine ${_strata_gpu_runtime_target})
     add_test(NAME stepquant_test COMMAND stepquant_test)
     set_tests_properties(stepquant_test PROPERTIES SKIP_RETURN_CODE 77)
   endif()

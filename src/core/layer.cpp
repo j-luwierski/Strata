@@ -324,9 +324,10 @@ st_begin(layer, 12, stream);
     GdnBuffers scratch_buffers = b;
     if (stepquant_enabled()) {
         scratch_buffers.state = b.stepquant_scratch;
-        try { stepquant_read((int) layer, scratch_buffers.state, stream); }
+        try { stepquant_read((int) layer, b.state, scratch_buffers.state, stream); }
         catch (const std::exception& e) { err = e.what(); return false; }
     }
+    void* packed_slot = b.state;
     { const GdnBuffers& b = scratch_buffers;
 #endif
     // Plan v0.3 P3: with the native contract the step and the output norm are one kernel (after the z GEMV).
@@ -353,7 +354,7 @@ try {
 } catch (const std::exception& error) { err = v.name("gdn_out_norm") + ": " + error.what(); return false; }
 #ifdef STRATA_ENABLE_STEPQUANT
 // Readout uses the FP32 update; only the packed state is carried to the next token.
-try { stepquant_writeback((int) layer, b.state, stream); }
+try { stepquant_writeback((int) layer, packed_slot, b.state, stream); }
 catch (const std::exception& e) { err = v.name("stepquant") + ": " + e.what(); return false; }
 #endif
 st_end(layer, 14, stream);

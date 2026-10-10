@@ -414,12 +414,6 @@ Verifier::~Verifier() {
 
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
                     const NativeHead* head, int max_t, std::string& err) {
-#ifdef STRATA_ENABLE_STEPQUANT
-    if (strata::kernels::stepquant_enabled()) {
-        err = "STEPQuant requires plain decode; speculative/batch verification is unsupported";
-        return false;
-    }
-#endif
     g_diag_verifier.store(this);
     (void) route_resident_cfg().stats();   // STRATA_ROUTE_RESIDENT: the counters are allocated outside graph capture
     diag_verify_fn().store(&diag_active_verifier);
@@ -712,8 +706,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const int64_t IQ = g.idx_q_heads, ID = g.idx_key_dim, NE = g.n_expert, MT = max_t_;
     const QsaShapes s = shapes_of(g);
     const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
+#ifdef STRATA_ENABLE_STEPQUANT
+    const uint64_t gdn_floats = stepquant_enabled() ? stepquant_recurrence_bytes()/4 +
+        (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1) :
+        (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
+#else
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+#endif
     const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
     const int64_t TS = (s.idx_block - 1) * ID;
     const bool ple_on = ss.ple.ready() && ple_stage();
@@ -983,6 +983,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 const int64_t gi = gdn_idx[(size_t) l];
                 float* state = ss.gdn_state + (size_t) (gi - ss.gdn_ord0) * gdn_floats;
                 float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled()) conv = state + stepquant_recurrence_bytes()/4;
+#endif
                 float* qkv = qkv_L_ + (size_t) gi * MT * C;
                 float* hb = h_L_ + (size_t) gi * MT * C;
                 float* gate = gate_L_ + (size_t) gi * MT * HV;
@@ -1006,6 +1009,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         SessionState& sx = slot_ss(first);
                         const float* cx = sx.gdn_state + (size_t) (gi - sx.gdn_ord0) * gdn_floats +
                                           (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+                        if (stepquant_enabled()) cx = sx.gdn_state + (size_t) (gi-sx.gdn_ord0)*gdn_floats + stepquant_recurrence_bytes()/4;
+#endif
                         gdn_conv_l2_multi(cx, qkv + (size_t) first * C, (const float*) wc->data,
                                           hb + (size_t) first * C, (int) C, (int) (2 * HK), EPS, t - first, cs, 0);
                     }
@@ -1032,17 +1038,34 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         while (t < te && brow_[t] == brow_[first]) ++t;
                         SessionState& sx = slot_ss(first);
                         float* stx = sx.gdn_state + (size_t) (gi - sx.gdn_ord0) * gdn_floats;
+#ifdef STRATA_ENABLE_STEPQUANT
+                        if (stepquant_enabled()) stepquant_verify((int) l, stx, sx.gdn.stepquant_scratch, sx.gdn.stepquant_temporary,
+                            hb+(size_t) first*C, (int) C, gate+(size_t) first*HV, beta+(size_t) first*HV,
+                            z_+(size_t) first*ZV, (const float*) wnm->data, EPS, y_+(size_t) first*ZV,
+                            (int) HK, (int) HV, t-first, nullptr, cs);
+                        else
+#endif
                         gdn_step_norm_multi(stx, hb + (size_t) first * C, (int) C, gate + (size_t) first * HV,
                                             beta + (size_t) first * HV, z_ + (size_t) first * ZV,
                                             (const float*) wnm->data, EPS, y_ + (size_t) first * ZV,
                                             (int) HK, (int) HV, t - first, nullptr, cs, 0);
                     }
                 } else
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled()) stepquant_verify((int) l, state, ss.gdn.stepquant_scratch, ss.gdn.stepquant_temporary,
+                    hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK, (int) HV,
+                    te, self_commit ? one_ : nullptr, cs);
+                else
+#endif
                 gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_, (int) HK,
                                     (int) HV, te, self_commit ? one_ : nullptr, cs, tb, g_qfuse() ? (void*) xq_ : nullptr);
                 stamp(l, 6, grp);
                 // STRATA_QFUSE: done above by gdn_step_norm_multi - but a batch's per-slot recurrence passes it no q8_1
                 // destination (#1139: the out-projection read stale bytes), so that case quantizes here as without it
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled() && g_qfuse() && !batch_rec_)
+                    native_quantize_q8_1(y_+(size_t) tb*ZV, xq_, (int) ZV, n, cs);
+#endif
                 if (!g_qfuse() || batch_rec_) native_quantize_q8_1(y_ + (size_t) tb * ZV, xq_, (int) ZV, n, cs);
                 il_ready = false;
                 mm(wout, bo_ + tb * N, (int) ZV, (int) N);
@@ -1784,8 +1807,14 @@ bool Verifier::capture_commit(std::string& err) {
     SessionState& ss = *ss_;
     const QsaShapes s = shapes_of(g);
     const int64_t C = g.ssm_conv_channels, HV = g.ssm_v_heads, ID = g.idx_key_dim, MT = max_t_;
+#ifdef STRATA_ENABLE_STEPQUANT
+    const uint64_t gdn_floats = stepquant_enabled() ? stepquant_recurrence_bytes()/4 +
+        (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1) :
+        (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
+#else
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+#endif
     const int64_t TS = (s.idx_block - 1) * ID;
     const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
@@ -1804,8 +1833,18 @@ bool Verifier::capture_commit(std::string& err) {
                 if (!wnm) { ok = false; break; }
                 float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
                 float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled()) conv = state + stepquant_recurrence_bytes()/4;
+#endif
                 const float* qkv = qkv_L_ + (size_t) gdn_index * MT * C;
                 gdn_conv_commit(conv, qkv, (int) C, commit_, cs_);
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled()) stepquant_verify((int) l, state, ss.gdn.stepquant_scratch, ss.gdn.stepquant_temporary,
+                    h_L_+(size_t) gdn_index*MT*C, (int) C, gate_L_+(size_t) gdn_index*MT*HV,
+                    beta_L_+(size_t) gdn_index*MT*HV, z_, (const float*) wnm->data, EPS, y_dummy_,
+                    (int) g.ssm_k_heads, (int) HV, (int) MT, commit_, cs_);
+                else
+#endif
                 gdn_step_norm_multi(state, h_L_ + (size_t) gdn_index * MT * C, (int) C, gate_L_ + (size_t) gdn_index * MT * HV,
                                     beta_L_ + (size_t) gdn_index * MT * HV, z_, (const float*) wnm->data, EPS, y_dummy_,
                                     (int) g.ssm_k_heads, (int) HV, (int) MT, commit_, cs_,
@@ -2392,8 +2431,14 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
     const QsaShapes s = shapes_of(g);
     const int64_t C = g.ssm_conv_channels, HV = g.ssm_v_heads, ZV = g.ssm_value_dim, ID = g.idx_key_dim, MT = max_t_;
     const int64_t CB = 2 + MT, nQ = g.n_qsa_layers();
+#ifdef STRATA_ENABLE_STEPQUANT
+    const uint64_t gdn_floats = stepquant_enabled() ? stepquant_recurrence_bytes()/4 +
+        (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1) :
+        (uint64_t) g.ssm_state_size*g.ssm_v_heads*g.ssm_state_size + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
+#else
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+#endif
     const int64_t TS = (s.idx_block - 1) * ID;
     const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
@@ -2419,8 +2464,20 @@ bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri
                     const int32_t* keep = commitb_ + (size_t) rows[first] * CB;
                     float* state = sx.gdn_state + (size_t) (gdn_index - sx.gdn_ord0) * gdn_floats;
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+                if (stepquant_enabled()) conv = state + stepquant_recurrence_bytes()/4;
+#endif
                     gdn_conv_commit(conv, qkv_L_ + (size_t) gdn_index * MT * C + (size_t) first * C,
                                     (int) C, keep, cs_);
+#ifdef STRATA_ENABLE_STEPQUANT
+                    if (stepquant_enabled()) stepquant_verify((int) l, state, sx.gdn.stepquant_scratch, sx.gdn.stepquant_temporary,
+                        h_L_+(size_t) gdn_index*MT*C+(size_t) first*C, (int) C,
+                        gate_L_+(size_t) gdn_index*MT*HV+(size_t) first*HV,
+                        beta_L_+(size_t) gdn_index*MT*HV+(size_t) first*HV, z_+(size_t) first*ZV,
+                        (const float*) wnm->data, EPS, y_dummy_+(size_t) first*ZV,
+                        (int) g.ssm_k_heads, (int) HV, t-first, keep, cs_);
+                    else
+#endif
                     gdn_step_norm_multi(state, h_L_ + (size_t) gdn_index * MT * C + (size_t) first * C, (int) C,
                                         gate_L_ + (size_t) gdn_index * MT * HV + (size_t) first * HV,
                                         beta_L_ + (size_t) gdn_index * MT * HV + (size_t) first * HV,

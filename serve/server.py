@@ -2167,6 +2167,12 @@ def engine_args(cfg: dict) -> list[str]:
     config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
     layer_split_value)."""
     args = list(cfg["args"])
+    # Calibrated packed recurrence is opt-in; raw args take precedence.
+    if cfg.get("stepquant_plan") and "--stepquant-plan" not in args:
+        plan = cfg["stepquant_plan"]
+        if not isinstance(plan, str):
+            raise ValueError("stepquant_plan must be a plan file path")
+        args += ["--stepquant-plan", plan]
     # #1322: a config with a "vision" section but without --vision in its args (written by an older setup run, or edited by
     # hand) advertised images and then refused every picture ("this engine was started without --vision").  The section
     # says images are wanted: start the engine with them, and keep the encoder's VRAM free as setup does for a GPU encoder

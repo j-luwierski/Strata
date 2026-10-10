@@ -3,6 +3,9 @@
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include "strata/sycl_queue.hpp"
+#ifdef STRATA_ENABLE_STEPQUANT
+#include "strata/kernels/stepquant.hpp"
+#endif
 #include "strata/core/session.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/core/progress.hpp"
@@ -41,6 +44,10 @@ uint64_t align_up(uint64_t n, uint64_t a) { return (n + a - 1) / a * a; }
 /// `GdnBuffers::state`/`conv_state` point INTO that carve, so a session with 36 GDN layers has to give each one
 /// its own - they cannot share, because the recurrence is the whole point.
 uint64_t gdn_state_floats(const ModelGeometry& g) {
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled())
+        return strata::kernels::stepquant_recurrence_bytes()/4 + (uint64_t) g.ssm_conv_channels*(g.ssm_d_conv-1);
+#endif
     return (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
            (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
 }
@@ -63,6 +70,9 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
     const int64_t gdn_n = std::max<int64_t>((layer_hi - layer_lo) - std::max<int64_t>(q_hi - q_lo, 0), 0);
     uint64_t n = 0;
     n += gdn_buffers_bytes(g);
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled()) n += strata::kernels::stepquant_recurrence_bytes();
+#endif
     n += (uint64_t) gdn_n * gdn_state_floats(g) * 4;
     // One QSA state carries the RoPE table; the others borrow it (P7: 64 MiB per layer at 262K).
     if (g.n_qsa_layers() > 0)
@@ -76,6 +86,10 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
 
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s,
                       int64_t layer_lo, int64_t layer_hi) {
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (!strata::kernels::stepquant_accepts_geometry((int) g.n_layers, (int) g.qsa_interval,
+            (int) g.ssm_v_heads, (int) g.ssm_state_size)) return 0;
+#endif
     if (layer_hi < 0 || layer_hi > g.n_layers) layer_hi = g.n_layers;
     if (layer_lo < 0) layer_lo = 0;
     uint8_t* p = (uint8_t*) base;
@@ -98,7 +112,15 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     s.gdn_alloc = std::max<int64_t>((layer_hi - layer_lo) - q_n_range, 0);
 
     gdn_buffers_init(g, take(gdn_buffers_bytes(g)), s.gdn);
+#ifdef STRATA_ENABLE_STEPQUANT
+    s.gdn.stepquant_scratch = s.gdn.state;
+    s.gdn.stepquant_temporary = strata::kernels::stepquant_enabled() ? take(strata::kernels::stepquant_recurrence_bytes()) : nullptr;
+#endif
     s.gdn_state = (float*) take((uint64_t) s.gdn_alloc * gdn_state_floats(g) * 4);
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (!strata::kernels::stepquant_bind_session(s.gdn_state, (size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4,
+                                               (int) s.gdn_alloc, (int) s.gdn_ord0)) return 0;
+#endif
 
     // the QSA states are separate allocations carved from one arena, because `QsaState` is a struct of
     // pointers and `qsa_state_init` writes them - a contiguous array would need the arena to be laid out the
@@ -131,6 +153,9 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
 }
 
 void session_release(SessionState& s) {
+#ifdef STRATA_ENABLE_STEPQUANT
+    strata::kernels::stepquant_unbind_session(s.gdn_state);
+#endif
     for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
         if (s.qsa_states[j].owns_rope) {
             strata::kernels::rope_table_release(s.qsa_states[j].cos_tab);
@@ -157,6 +182,9 @@ void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, 
     }
     // every owned GDN layer's recurrence and conv history
     cs->memset(s.gdn_state, 0, (size_t)s.gdn_alloc * gdn_state_floats(g) * 4);
+#ifdef STRATA_ENABLE_STEPQUANT
+    strata::kernels::stepquant_zero_session(s.gdn_state, (size_t) g.ssm_conv_channels*(g.ssm_d_conv-1)*4, stream);
+#endif
     // and every owned QSA layer's cache and indexer
     for (int64_t j = 0; j < s.qsa_alloc; ++j) qsa_state_zero(s.qsa_states[s.qsa_ord0 + j], g, stream);
     // **AND THE PLE'S CONV HISTORY AND TOKEN WINDOW.**  A sequence that started with a warm history would
@@ -178,6 +206,10 @@ void gdn_point_at(const ModelGeometry& g, int64_t layer, SessionState& s) {
     for (int64_t l = 0; l < layer; ++l) if (!is_qsa_layer(g, l)) ++gdn_index;
     s.gdn.state = s.gdn_state + (size_t) (gdn_index - s.gdn_ord0) * gdn_state_floats(g);
     s.gdn.conv_state = s.gdn.state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled())
+        s.gdn.conv_state = s.gdn.state + strata::kernels::stepquant_recurrence_bytes()/4;
+#endif
 }
 
 /// The per-token staging every QSA layer's captured H2D reads FROM.  Must run before each replay: the graphs
@@ -1155,6 +1187,10 @@ bool session_token(const WeightTable &tables, const ModelGeometry &g,
         if (!is_qsa_layer(g, l)) {
             s.gdn.state = s.gdn_state + (size_t) gdn_index * gdn_state_floats(g);
             s.gdn.conv_state = s.gdn.state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+#ifdef STRATA_ENABLE_STEPQUANT
+    if (strata::kernels::stepquant_enabled())
+        s.gdn.conv_state = s.gdn.state + strata::kernels::stepquant_recurrence_bytes()/4;
+#endif
             ++gdn_index;
         }
 

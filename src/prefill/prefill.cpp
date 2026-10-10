@@ -2542,10 +2542,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     float* state = ss.gdn_state + (size_t) (gdn_index - ss.gdn_ord0) * gdn_floats;
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
 #ifdef STRATA_ENABLE_STEPQUANT
+                    void* packed_slot = state;
                     if (strata::kernels::stepquant_enabled()) {
                         conv = state + strata::kernels::stepquant_recurrence_bytes()/4;
                         state = ss.gdn.stepquant_scratch;
-                        try { strata::kernels::stepquant_read((int) l, state, m.cs); }
+                        try { strata::kernels::stepquant_read((int) l, packed_slot, state, m.cs); }
                         catch (const std::exception& e) { err = e.what(); return false; }
                     }
 #endif
@@ -2558,11 +2559,22 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, EPS, m.cs);
                     pt.mark(kPfGdnRec, cs);
                     const int64_t ld_y = pf_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) ? ZV + ZV_PAD : 0;
+#ifdef STRATA_ENABLE_STEPQUANT
+                    if (strata::kernels::stepquant_trace_enabled()) {
+                        const int64_t stride = ld_y ? ld_y : ZV;
+                        for (int64_t t = 0; t < T; ++t) {
+                            gdn_recurrence(state, m.hbuf+t*C, m.gate+t*HV, m.beta+t*HV, m.z+t*ZV,
+                                           (const float*) wnm->data, EPS, m.y+t*ZV, m.y_h+t*stride, 1, m.cs, ld_y);
+                            strata::kernels::stepquant_observe((int) l, m.hbuf+t*C, m.gate+t*HV, m.beta+t*HV,
+                                                              state, (int) g.ssm_k_heads, (int) HV, m.cs);
+                        }
+                    } else
+#endif
                     gdn_recurrence(state, m.hbuf, m.gate, m.beta, m.z, (const float*) wnm->data, EPS, m.y, m.y_h, T, m.cs,
                                    ld_y);
 #ifdef STRATA_ENABLE_STEPQUANT
                     // Prompt recurrence/readouts stay FP32; writeback is at each prefill chunk boundary.
-                    try { strata::kernels::stepquant_writeback((int) l, state, m.cs); }
+                    try { strata::kernels::stepquant_writeback((int) l, packed_slot, state, m.cs); }
                     catch (const std::exception& e) { err = e.what(); return false; }
 #endif
                     pt.mark(kPfGdnOut, cs);

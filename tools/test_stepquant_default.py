@@ -6,6 +6,7 @@ This checks source preservation, not full-model output parity. Run from the repo
 from pathlib import Path
 import subprocess
 files=['src/core/layer.cpp','src/core/verify.cpp','src/prefill/prefill.cpp','src/program/generate.cpp','src/core/session.cpp','src/core/conversation_state.cpp','include/strata/core/layer.hpp']
+files += ['sycl/'+name for name in files if Path('sycl/'+name).is_file()]
 for name in files:
  lines=Path(name).read_text().splitlines(keepends=True); result=[]; active=True; stack=[]
  for line in lines:
