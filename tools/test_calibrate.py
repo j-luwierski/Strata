@@ -500,6 +500,8 @@ class SetupIntegration(unittest.TestCase):
         self.assertTrue(self.S.calibrate_config(cfg_path))
         written = json.loads(cfg_path.read_text())
         self.assertEqual(self.S.hardware_key(cfg), self.S.hardware_key(written))
+        self.assertNotEqual(self.S.hardware_key(cfg),
+                            self.S.hardware_key(dict(cfg, dflash2_head="turbo-brilliance")))
         self.assertEqual(self.S.saved_calibration(cfg)["settings"], settings)
         self.assertEqual(self.S.saved_calibration(cfg)["report"], report)
         restored = CAL.apply(cfg["args"], self.S.saved_calibration(cfg)["settings"])

@@ -1,4 +1,4 @@
-"""Installer tests for the official DFlash2 option and its shared output head.
+"""Installer tests for the DFlash2 checkpoint choices and shared output head.
 
 These use tiny synthetic GGUFs and temporary folders; they need no GPU or downloads.
 Run with: .venv/bin/python tools/test_setup_dflash2.py
@@ -77,6 +77,7 @@ class ArtifactNote(unittest.TestCase):
 class DrafterChoice(unittest.TestCase):
     def test_setup_owns_new_keys_and_drops_old_keys(self):
         self.assertIn("dflash2", setup.SETUP_KEYS)
+        self.assertIn("dflash2_head", setup.SETUP_KEYS)
         self.assertIn("dflash2_quant", setup.SETUP_KEYS)
         self.assertIn("dflash", setup.SETUP_KEYS)  # old config keys are consumed during migration
         old = {"dflash": "old.gguf", "dflash_quant": "q4", "dflash_head": "original"}
@@ -91,6 +92,10 @@ class DrafterChoice(unittest.TestCase):
             self.assertEqual(setup.choose_drafter(None, "auto", None, True), ("dflash2", "q8"))
         with patch.object(setup, "say"), patch.object(setup, "ask", return_value="2"):
             self.assertEqual(setup.choose_drafter("dflash2", None, None, False), ("dflash2", "q4"))
+        self.assertEqual(setup.choose_drafter(None, None, None, True, head="turbo-brilliance"), ("dflash2", "q8"))
+        with patch.object(setup, "say"), patch.object(setup, "ask", return_value="2"):
+            self.assertEqual(setup.choose_dflash2_head(None, False), "turbo-brilliance")
+        self.assertEqual(setup.choose_dflash2_head(None, True), "official")
         for quant in setup.DFLASH2_QUANTS:
             self.assertEqual(setup.choose_drafter("dflash2", None, quant, True), ("dflash2", quant))
         with patch.object(setup, "fail", side_effect=ValueError):
@@ -129,10 +134,11 @@ class DrafterChoice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "strata-iq3_xxs.json"
             cfg.write_text(json.dumps({"args": ["--dflash", "draft-q8.gguf"], "drafter": "dflash2",
-                                      "dflash2": "draft-q8.gguf", "dflash2_quant": "q8", "dflash2_source": "auto"}))
+                                      "dflash2": "draft-q8.gguf", "dflash2_quant": "q8", "dflash2_source": "auto",
+                                      "dflash2_head": "turbo-brilliance"}))
             saved = setup.choices_from_config(cfg)
-            self.assertEqual((saved["drafter"], saved["dflash2"], saved["dflash2_quant"]),
-                             ("dflash2", "auto", "q8"))
+            self.assertEqual((saved["drafter"], saved["dflash2"], saved["dflash2_quant"], saved["dflash2_head"]),
+                             ("dflash2", "auto", "q8", "turbo-brilliance"))
             cfg.write_text(json.dumps({"args": ["--dflash", "old-dflash.gguf"], "drafter": "dflash"}))
             self.assertEqual(setup.choices_from_config(cfg)["drafter"], "mtp")
 
@@ -198,6 +204,48 @@ class Preparation(unittest.TestCase):
                 revision = setup.HF_REVISIONS[setup.DFLASH2_REPO]
                 self.assertTrue(all(revision in url for url in fetched))
                 self.assertEqual(setup.prepare_dflash2(data, [data], "auto", "bf16", {}), output)
+                self.assertEqual(len(fetched), 2)
+
+    def test_turbo_brilliance_auto_download_uses_its_own_pin_and_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = Path(d)
+            checkpoint = b"synthetic Turbo-Brilliance DFlash2 checkpoint"
+            digest = hashlib.sha256(checkpoint).hexdigest()
+            fetched = []
+
+            def fetch(url, path, what=None):
+                fetched.append(url)
+                path.write_bytes(checkpoint if path.name == "model.safetensors" else b"{}")
+
+            def convert(cmd, **kwargs):
+                out = Path(cmd[cmd.index("-o") + 1])
+                w = GGUFWriter()
+                w.add("general.architecture", "dflash")
+                w.add("general.name", "DFlash2 Turbo-Brilliance fine-tune")
+                for key, value in (("embedding_length", 2560), ("block_count", 5), ("attention.head_count", 32),
+                                   ("attention.head_count_kv", 8), ("attention.key_length", 128),
+                                   ("feed_forward_length", 7680), ("vocab_size", 248320), ("block_size", 8),
+                                   ("mask_token_id", 248077), ("conv_kernel_size", 2), ("conv_group_size", 16),
+                                   ("selector_rank", 256), ("selector_top_k", 16), ("attention.sliding_window", 2048)):
+                    w.add("dflash." + key, value)
+                w.add("dflash.sample_from_anchor", "false")
+                w.add("dflash.target_layers", [5, 15, 25, 35, 45])
+                w.add("dflash.source.sha256", digest)
+                for i in range(81):
+                    w.add_bf16(f"norm-{i}.weight", np.ones((32,), np.float32), shape=[32])
+                w.write(out)
+
+            head = {**setup.DFLASH2_HEADS["turbo-brilliance"], "sha256": digest}
+            with patch.object(setup, "download", side_effect=fetch), patch.object(setup, "run", side_effect=convert), \
+                    patch.dict(setup.DFLASH2_HEADS, {"turbo-brilliance": head}):
+                output = setup.prepare_dflash2(data, [data], "auto", "bf16", {}, "turbo-brilliance")
+                self.assertTrue(output.is_file())
+                self.assertEqual(output.parent, data / "dflash2" / "turbo-brilliance")
+                self.assertEqual(len(fetched), 2)
+                repo = head["repo"]
+                revision = setup.HF_REVISIONS[repo]
+                self.assertTrue(all(f"/{repo}/resolve/{revision}/" in url for url in fetched))
+                self.assertEqual(setup.prepare_dflash2(data, [data], "auto", "bf16", {}, "turbo-brilliance"), output)
                 self.assertEqual(len(fetched), 2)
 
 

@@ -4,7 +4,7 @@
     START-HERE.bat  (Windows)   /   ./setup.sh  (Linux)      - they install Python if needed and run this file
 
 The first time it asks which model, size, drafter, context and image support to use. DFlash2 also asks for
-its weight quantization. It then installs everything and starts the model on http://127.0.0.1:8080
+its checkpoint and weight quantization. It then installs everything and starts the model on http://127.0.0.1:8080
 (OpenAI- and Anthropic-compatible API; a small page there shows that it runs). Later starts reuse the
 saved choices and files.
 
@@ -17,7 +17,7 @@ What the first run does (each step is skipped when it is already done):
      it installs the missing build tools (asks first) and compiles the engine for your GPU.  AMD (--backend hip, chosen by
      itself on a PC with no usable NVIDIA card): the ready-made HIP engine on Windows, compiled here on Linux
   5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
-  6. prepares the model and the selected drafter: MTP (~5 GB) or official DFlash2 (~1.2 GB, optional Q8_0/Q4_0)
+  6. prepares the model and the selected drafter: MTP (~5 GB) or DFlash2 (~1.2 GB, optional Q8_0/Q4_0)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
 Options: --family qwen|swift, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
@@ -29,7 +29,8 @@ answers, no questions), --setup (install another model / change settings instead
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
 engine), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
---kv-streaming on|off|auto, --drafter mtp|dflash2|none, --dflash2 [GGUF], --dflash2-quant bf16|q8|q4.
+--kv-streaming on|off|auto, --drafter mtp|dflash2|none, --dflash2 [GGUF],
+--dflash2-head official|turbo-brilliance, --dflash2-quant bf16|q8|q4.
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - a longer context, more GPUs, a bigger RAM budget, a size it thinks will not fit - is kept, with
@@ -90,6 +91,7 @@ WIN = os.name == "nt"
 HF_REVISIONS = {
     "PixelML/Qwen3.8-Flash-Next-NVFP4-DFlash": "9cd660f9050c92fedc88cbe547bd53af0392abe1",
     "incoai/Qwen3.8-Flash-Next-DFlash2": "a22a1744e85c17364dcc54a6a420af7135d4c7f6",
+    "hotocooo/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-DFlash": "c785754aa88c5e5931e76fdd8236c53b818e01e4",
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF": "ed59f92082b1e93c0e96d60a8b11aab089b52f09",        # 2026-09-29
     "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF": "99bb8f7f95c7aa7b24a36a7786a4f657b30f5d3d",   # 2026-10-07 (adds IQ3_S)
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": "5348543e0147355ac9cbcb031184a3546350988e",  # 2026-09-29
@@ -663,6 +665,8 @@ PREVIEW_FAMILIES = OWN_PATH_FAMILIES             # the earlier name (tools and t
 REPO_PINS = {
     "incoai/Qwen3.8-Flash-Next-DFlash2": {
         "model.safetensors": (1206140008, "d6723f2a359eaf33ec0c95f22ae8edda896774020c552296a85e1913b4d3186f")},
+    "hotocooo/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-DFlash": {
+        "model.safetensors": (1206140008, "ffebb0ce0267a9a87a16caebe12d7184604a03823eed49cf043dbb826d6f05b7")},
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF": ISTA_FILES,
     "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF": SWIFT_FILES,
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": CODER_FILES,
@@ -5595,7 +5599,7 @@ def write_config(path: Path, cfg: dict):
 # then applies the person's options over the generated ones
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "drafter", "dflash",
-                        "dflash2", "dflash2_quant", "dflash2_source", "dflash_quant", "dflash_source",
+                        "dflash2", "dflash2_head", "dflash2_quant", "dflash2_source", "dflash_quant", "dflash_source",
                         "dflash_head", "vision", "args_written"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP", "STRATA_MMQ_KQ", "STRATA_HC_Q8",
                        "STRATA_ROUTE_TAIL_SKIP"}) | frozenset(GFX1103_SWITCHES) | frozenset(GFX1150_SWITCHES)   # the "env" entries setup writes (the gfx1103 switches are setup's too: a re-run refreshes them, they do not linger)
@@ -5852,6 +5856,8 @@ def choices_from_config(cfg_path: Path) -> dict:
             val("--dflash") if cfg.get("dflash2_quant", "q8") == "bf16" else "auto")
     return {"drafter": drafter,
             "dflash2": dflash2_source,
+            "dflash2_head": cfg.get("dflash2_head", "official")
+            if drafter == "dflash2" and dflash2_source == "auto" else None,
             "dflash2_quant": cfg.get("dflash2_quant", "q8") if drafter == "dflash2" else None,
             "family": family, "model": model if model in MODELS else None,
             "context": int(val("--max-context")) if val("--max-context") else None,
@@ -6039,9 +6045,11 @@ def hardware_key(cfg: dict) -> str:
         performance_env = {k: (cfg.get("env") or {}).get(k) for k in
                            ("STRATA_DFLASH_HEAD_IL", "STRATA_MMVQ_IL_Q8_HEAD", "STRATA_DFLASH_GRAPH_BUCKET",
                             "STRATA_PREFILL_CPU_SHARE")}
+        head = str(cfg.get("dflash2_head", "official"))
+        head_suffix = "" if head == "official" else "|" + head
         return key + "|dflash2-profile-v2|" + str(cfg.get("dflash2_quant", "q8")) + "|" + "|".join(
             value(f) for f in ("--dflash", "--mtp", "--spec", "--dflash-window")) + "|" + json.dumps(
-                performance_env, sort_keys=True, separators=(",", ":"))
+                performance_env, sort_keys=True, separators=(",", ":")) + head_suffix
     if "--dflash" in a:
         def value(flag):
             return str(a[a.index(flag) + 1]) if flag in a and a.index(flag) + 1 < len(a) else ""
@@ -6348,16 +6356,24 @@ DRAFT_VOCABS = {"cjk": "draft_vocab.bin", "en": "draft_vocab_en.bin", "cyrillic"
 
 DFLASH2_REPO = "incoai/Qwen3.8-Flash-Next-DFlash2"
 DFLASH2_SHA256 = "d6723f2a359eaf33ec0c95f22ae8edda896774020c552296a85e1913b4d3186f"
+DFLASH2_HEADS = {
+    "official": {"repo": DFLASH2_REPO, "sha256": DFLASH2_SHA256, "label": "Official",
+                 "target": "Qwen3.8-Flash-Next"},
+    "turbo-brilliance": {
+        "repo": "hotocooo/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-DFlash",
+        "sha256": "ffebb0ce0267a9a87a16caebe12d7184604a03823eed49cf043dbb826d6f05b7",
+        "label": "Turbo-Brilliance fine-tune", "target": "DavidAU Turbo-Brilliance GSQ-RCO IQ3_S"},
+}
 # Q8_0 was the most even quantized option in the same-day RTX 4070 Ti SUPER comparison.
 # Q4_0 remains available when fitting more target experts in VRAM matters more.
 DFLASH2_QUANTS = {"bf16": None, "q8": "Q8_0", "q4": "Q4_0"}
 
 
-def choose_drafter(method, path, quant, yes):
+def choose_drafter(method, path, quant, yes, head=None):
     """The same numbered menus and --yes defaults as the other setup choices."""
-    if method in ("mtp", "none") and (path or quant):
-        fail(f"--drafter {method} cannot be combined with --dflash2 or --dflash2-quant")
-    method = method or ("dflash2" if path or quant else None)
+    if method in ("mtp", "none") and (path or quant or head):
+        fail(f"--drafter {method} cannot be combined with --dflash2, --dflash2-head or --dflash2-quant")
+    method = method or ("dflash2" if path or quant or head else None)
     if method is None:
         say()
         say("  Speculative decoding = a small drafter proposes tokens which the target checks.")
@@ -6373,6 +6389,18 @@ def choose_drafter(method, path, quant, yes):
         say("  3) Original BF16")
         quant = {"1": "q8", "2": "q4", "3": "bf16"}[ask("DFlash2 quantization?", ["1", "2", "3"], "1", yes)]
     return method, (quant or "q8") if method == "dflash2" else quant
+
+
+def choose_dflash2_head(head, yes):
+    """Choose a pinned DFlash2 checkpoint; the official model remains the setup default."""
+    if head is not None:
+        return head
+    say()
+    say("  DFlash2 head checkpoint:")
+    say("  1) Official (default; trained for Qwen3.8-Flash-Next)")
+    say("  2) Turbo-Brilliance fine-tune (trained for DavidAU's Turbo-Brilliance GSQ-RCO IQ3_S)")
+    say("     Other target models with the same architecture can verify its proposals, but their speed is unmeasured.")
+    return {"1": "official", "2": "turbo-brilliance"}[ask("DFlash2 head?", ["1", "2"], "1", yes)]
 
 
 def drafter_args(dflash2, rt, draft_vocab=None):
@@ -6403,43 +6431,52 @@ def sync_dflash_vocab(cfg):
     return True
 
 
-def prepare_dflash2(data, roots, source, quant, env):
-    """Fetch the pinned official DFlash2 checkpoint, convert once, then reuse a validated quantized GGUF."""
+def prepare_dflash2(data, roots, source, quant, env, head="official"):
+    """Fetch a pinned DFlash2 checkpoint, convert once, then reuse a validated quantized GGUF."""
+    if head not in DFLASH2_HEADS:
+        fail(f"unsupported DFlash2 head {head!r}; choose one of {', '.join(DFLASH2_HEADS)}")
     sys.path.insert(0, str(ROOT / "tools"))
     from gguf_reader import GGUFFile
+    # Preserve the original official cache paths; the opt-in fine-tune gets a separate cache.
     folder = data / "dflash2"
+    variant_folder = folder if head == "official" else folder / head
+    variant_folder.mkdir(parents=True, exist_ok=True)
     folder.mkdir(parents=True, exist_ok=True)
+    repo = DFLASH2_REPO if head == "official" else DFLASH2_HEADS[head]["repo"]
+    expected_sha = DFLASH2_SHA256 if head == "official" else DFLASH2_HEADS[head]["sha256"]
     try:
         if source != "auto":
             original = Path(source).expanduser().resolve()
             dflash2_artifact_note(original)
         else:
-            original = find_in(roots, "dflash2/dflash2-bf16.gguf") or folder / "dflash2-bf16.gguf"
+            relative = "dflash2/dflash2-bf16.gguf" if head == "official" else f"dflash2/{head}/dflash2-bf16.gguf"
+            original = find_in(roots, relative) or variant_folder / "dflash2-bf16.gguf"
             good = False
             if original.is_file():
                 try:
                     g = GGUFFile(original)
                     good = (g.metadata.get("general.architecture") == "dflash" and
-                            g.metadata.get("dflash.source.sha256") == DFLASH2_SHA256 and
+                            g.metadata.get("dflash.source.sha256") == expected_sha and
                             g.metadata.get("dflash.selector_top_k") is not None and
                             len(g.tensors) == 81 and all(t.type_id == 30 and
                             g.data_start + t.offset + t.expected_bytes() <= original.stat().st_size for t in g.tensors))
                 except (OSError, ValueError):
                     pass   # regenerate an interrupted/corrupt cached export from the checked checkpoint
             if not good:
-                checkpoint = folder / "model.safetensors"
-                download(hf(DFLASH2_REPO) + "model.safetensors", checkpoint, "official DFlash2 checkpoint (~1.2 GB)")
+                checkpoint = variant_folder / "model.safetensors"
+                download(hf(repo) + "model.safetensors", checkpoint,
+                         f"{DFLASH2_HEADS[head]['label']} DFlash2 checkpoint (~1.2 GB)")
                 digest = hashlib.sha256()
                 with checkpoint.open("rb") as f:
                     for chunk in iter(lambda: f.read(8 << 20), b""):
                         digest.update(chunk)
-                if digest.hexdigest() != DFLASH2_SHA256:
+                if digest.hexdigest() != expected_sha:
                     checkpoint.with_name(checkpoint.name + ".done").unlink(missing_ok=True)
                     checkpoint.unlink()
                     fail("DFlash2 checkpoint SHA-256 does not match the pinned source; rerun setup to download it again")
-                config = folder / "config.json"
-                download(hf(DFLASH2_REPO) + "config.json", config, "DFlash2 configuration")
-                original = folder / "dflash2-bf16.gguf"
+                config = variant_folder / "config.json"
+                download(hf(repo) + "config.json", config, "DFlash2 configuration")
+                original = variant_folder / "dflash2-bf16.gguf"
                 tmp = original.with_suffix(".gguf.part")
                 run([sys.executable, str(ROOT / "tools/dflash_gguf.py"), str(checkpoint),
                      "--config", str(config), "-o", str(tmp)], env=env)
@@ -6455,7 +6492,7 @@ def prepare_dflash2(data, roots, source, quant, env):
                 digest.update(chunk)
         sha = digest.hexdigest()
         kind = DFLASH2_QUANTS[quant]
-        output = folder / f"dflash2-{sha[:16]}-{kind}.gguf"
+        output = variant_folder / f"dflash2-{sha[:16]}-{kind}.gguf"
         if output.is_file():
             try:
                 g = GGUFFile(output)
@@ -7697,7 +7734,9 @@ def main() -> int:
     ap.add_argument("--drafter", choices=["mtp", "dflash2", "none"],
                     help="model drafter: MTP (default), DFlash2 or none (prompt lookup remains enabled)")
     ap.add_argument("--dflash2", metavar="GGUF", nargs="?", const="auto",
-                    help="select the pinned official DFlash2 drafter; optionally pass a compatible GGUF")
+                    help="select the chosen pinned DFlash2 drafter; optionally pass a compatible GGUF")
+    ap.add_argument("--dflash2-head", choices=list(DFLASH2_HEADS),
+                    help="DFlash2 checkpoint: official (default) or turbo-brilliance (fine-tuned for DavidAU's IQ3_S target)")
     ap.add_argument("--dflash2-quant", choices=["bf16", "q8", "q4"],
                     help="DFlash2 backbone weights: BF16, Q8_0 (recommended) or Q4_0 (smaller); target head stays shared")
     ap.add_argument("--low-ram", choices=["auto", "on", "off", "resident", "mmap"], default="auto",
@@ -7739,9 +7778,11 @@ def main() -> int:
     if a.inspect:                                      # headers only: nothing is installed
         sys.exit(subprocess.run([sys.executable, str(ROOT / "tools" / "strata_inspect.py"), *a.inspect[:2]]).returncode)
     if sys.platform == "darwin" and CONTROL:           # the app on a Mac: model files only; the Metal engine is a component
+        if a.drafter == "dflash2" or a.dflash2 or a.dflash2_head or a.dflash2_quant:
+            fail("DFlash2 currently requires a locally compiled CUDA engine; it is not available through the app component")
         return mac_control_setup(a)
     if a.backend == "sycl":                            # Intel Arc: the SYCL port's own setup (sycl/setup_intel.py)
-        if a.drafter == "dflash2" or a.dflash2 or a.dflash2_quant:
+        if a.drafter == "dflash2" or a.dflash2 or a.dflash2_head or a.dflash2_quant:
             fail("DFlash2 currently requires the CUDA engine; choose MTP for SYCL")
         return sycl_setup(sys.argv[1:])
     if a.resident_budget_gib is not None and not a.resident_budget_gib > 0:
@@ -7776,9 +7817,9 @@ def main() -> int:
     # ---- 0. already installed: just start it
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
-    explicit = a.setup or a.model or a.family or a.check or a.no_start or a.drafter or a.dflash2 or a.dflash2_quant
+    explicit = a.setup or a.model or a.family or a.check or a.no_start or a.drafter or a.dflash2 or a.dflash2_quant or a.dflash2_head
     adopted = None                                     # #629: the earlier install this copy is set up like
-    if have and (a.drafter or a.dflash2 or a.dflash2_quant) and not (a.model or a.family):
+    if have and (a.drafter or a.dflash2 or a.dflash2_quant or a.dflash2_head) and not (a.model or a.family):
         ch = choices_from_config(have[0])
         a.family, a.model = ch["family"], ch["model"]
         a.context = a.context or ch["context"]
@@ -7798,6 +7839,7 @@ def main() -> int:
         if a.drafter in (None, "dflash2") and not a.dflash2 and ch["drafter"] == "dflash2":
             a.dflash2 = ch["dflash2"]
             a.dflash2_quant = a.dflash2_quant or ch.get("dflash2_quant")
+            a.dflash2_head = a.dflash2_head or ch.get("dflash2_head")
     if not have and not explicit:                      # a new copy of Strata (an update unzipped elsewhere): set it
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here
         if prev is not None:
@@ -7810,6 +7852,7 @@ def main() -> int:
                 a.drafter = a.drafter or ch["drafter"]
                 a.dflash2 = a.dflash2 or ch["dflash2"]
                 a.dflash2_quant = a.dflash2_quant or ch.get("dflash2_quant")
+                a.dflash2_head = a.dflash2_head or ch.get("dflash2_head")
                 a.kv = a.kv or ch["kv"]
                 a.vision = a.vision or ch["vision"]
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
@@ -8205,8 +8248,15 @@ def main() -> int:
     if MODELS[model].get("license"):                   # the ready-made packs: each size has its own license
         say(f"  Its license: {MODELS[model]['license']}")
     tag = fam["tag"] + model                           # names of the pack, config and start script
-    a.drafter, a.dflash2_quant = choose_drafter(a.drafter, a.dflash2, a.dflash2_quant, a.yes)
+    a.drafter, a.dflash2_quant = choose_drafter(a.drafter, a.dflash2, a.dflash2_quant, a.yes,
+                                                head=a.dflash2_head)
     if a.drafter == "dflash2":
+        if a.dflash2 not in (None, "auto"):
+            if a.dflash2_head:
+                fail("--dflash2-head selects a pinned checkpoint and cannot be combined with a local --dflash2 GGUF")
+            a.dflash2_head = "official"             # unused by prepare_dflash2 for a local GGUF
+        else:
+            a.dflash2_head = choose_dflash2_head(a.dflash2_head, a.yes)
         a.dflash2 = a.dflash2 or "auto"
         if multi or (a.parallel is not None and a.parallel > 1):
             fail("DFlash2 currently needs one GPU and --parallel 1; choose MTP for batched or split inference")
@@ -8215,7 +8265,9 @@ def main() -> int:
         if CONTROL:
             fail("DFlash2 requires a locally compiled CUDA engine; it is not available through the app component")
         a.build = True
-        ok(f"drafter: DFlash2 ({DFLASH2_QUANTS[a.dflash2_quant] or 'BF16'}, shared target head)")
+        head_label = DFLASH2_HEADS[a.dflash2_head]["label"] if a.dflash2 == "auto" else "custom GGUF"
+        ok(f"drafter: DFlash2 {head_label} "
+           f"({DFLASH2_QUANTS[a.dflash2_quant] or 'BF16'}, shared target head)")
     else:
         ok("model drafter: off (prompt lookup stays on)" if a.drafter == "none" else "drafter: MTP")
     small = min(x["vram_gb"] for x in chosen)         # each card keeps its layers' KV of the whole context
@@ -8563,7 +8615,7 @@ def main() -> int:
         run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(shards[0]), "--out", str(pack),
              "--experts-bin", *fam.get("pack_args", [])], env=env)       # #3193: Gyro needs --compat-bf16 here too
     ok(f"model prepared: {pack}")
-    dflash2 = prepare_dflash2(data, roots, a.dflash2, a.dflash2_quant, env) if a.dflash2 else None
+    dflash2 = prepare_dflash2(data, roots, a.dflash2, a.dflash2_quant, env, a.dflash2_head) if a.dflash2 else None
     draft_vocab = None
     rt = None
     if dflash2 is not None:
@@ -8573,6 +8625,9 @@ def main() -> int:
         except ValueError as e:
             fail(f"--dflash2 {dflash2}: {e}")
         ok(f"DFlash2 block drafter: {note}")
+        if a.dflash2_head == "turbo-brilliance":
+            warn("Turbo-Brilliance DFlash2 was fine-tuned for DavidAU's Turbo-Brilliance GSQ-RCO IQ3_S target; "
+                 "other same-architecture targets verify its proposals but have unmeasured draft speed")
         if a.draft_vocab:
             warn("--draft-vocab applies to MTP or plain DFlash only; DFlash2 uses the full shared target head")
     elif a.drafter == "mtp":
@@ -8869,6 +8924,8 @@ def main() -> int:
         cfg["draft_vocab"] = draft_vocab
     if dflash2:
         cfg["dflash2"] = str(dflash2)
+        if a.dflash2 == "auto":
+            cfg["dflash2_head"] = a.dflash2_head
         cfg["dflash2_quant"] = a.dflash2_quant
         cfg["dflash2_source"] = a.dflash2
         cfg["parallel"] = 1

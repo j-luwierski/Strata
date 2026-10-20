@@ -13,6 +13,14 @@ Its `model.safetensors` SHA-256 is
 It contains 81 BF16 tensors and no embedding or output-head tensor. The target supplies
 both the embedding and the full output head. A Qwen3.8-27B drafter is not a substitute.
 
+Setup also offers the opt-in [Turbo-Brilliance fine-tune](https://huggingface.co/hotocooo/Qwen3.8-Flash-Next-Abliterated-Uncensored-Turbo-Brilliance-50x-Reasoning-Instruct-GSQ-RCO-DFlash/tree/c785754aa88c5e5931e76fdd8236c53b818e01e4).
+It uses the same DFlash2 geometry, but was fine-tuned for DavidAU's Turbo-Brilliance
+GSQ-RCO IQ3_S target. Its proposals are still verified by the selected target model;
+draft speed for this CUDA DFlash2 conversion has not been measured. The upstream card's
+Apple M4 Max timings use its separate plain-DFlash GGUF. Setup downloads and converts
+the BF16 `model.safetensors`. The repository's `t3000-q8-dv.gguf` is the separate
+plain-DFlash artifact and is not the DFlash2 file used by setup.
+
 ## Setup
 
 Run `./setup.sh --setup` and select DFlash2, or use:
@@ -21,8 +29,16 @@ Run `./setup.sh --setup` and select DFlash2, or use:
 ./setup.sh --setup --yes --drafter dflash2 --dflash2-quant q8
 ```
 
+Choose the other pinned checkpoint with:
+
+```sh
+./setup.sh --setup --yes --drafter dflash2 --dflash2-head turbo-brilliance --dflash2-quant q8
+```
+
 Setup downloads the pinned checkpoint, checks its hash, converts it to GGUF and builds
-the local CUDA engine with `STRATA_ENABLE_DFLASH2=ON`. It offers BF16, Q8_0 and Q4_0.
+the local CUDA engine with `STRATA_ENABLE_DFLASH2=ON`. It offers the official checkpoint
+by default and the Turbo-Brilliance fine-tune as an explicit choice. Both offer BF16,
+Q8_0 and Q4_0.
 Q8_0 is the balanced recommendation from the local comparison; Q4_0 saves more memory.
 Only the 36 backbone matrices are quantized. The 45 norm, convolution and selector
 tensors remain BF16. A local compatible GGUF can be supplied with `--dflash2 FILE`.
