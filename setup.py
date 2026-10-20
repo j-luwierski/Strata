@@ -8420,8 +8420,6 @@ def main() -> int:
         margin = 0
     elif a.dflash2:
         margin = 4                                # DFlash2 artifact and conversion working space
-    elif a.dflash:
-        margin = 5 if a.dflash_head == "original" else 3  # DFlash conversion working space; MTP download is separate
     else:
         margin = 2 if mtp_have else 8
     real = to_fetch + prep_gb + \
